@@ -1,0 +1,97 @@
+"""
+Pydantic schemas for the RAG service.
+Defines input contract (from NLP service) and output contract (RAG response).
+"""
+
+from pydantic import BaseModel, Field
+from typing import Optional
+from datetime import datetime
+
+
+# ============================================================
+# INPUT MODELS (NLP Service → RAG Service)
+# ============================================================
+
+class CallQuality(BaseModel):
+    noise_level: str = Field(..., description="low | medium | high")
+    call_stability: str = Field(..., description="low | medium | high")
+    speech_naturalness: str = Field(..., description="natural | suspicious")
+
+
+class CallContext(BaseModel):
+    call_language: str
+    call_quality: CallQuality
+
+
+class SpeakerAnalysis(BaseModel):
+    customer_only_analysis: bool
+    agent_influence_detected: bool
+
+
+class IntentInsight(BaseModel):
+    label: str
+    confidence: float = Field(..., ge=0.0, le=1.0)
+    conditionality: str = Field(..., description="low | medium | high")
+
+
+class SentimentInsight(BaseModel):
+    label: str
+    confidence: float = Field(..., ge=0.0, le=1.0)
+
+
+class Entities(BaseModel):
+    payment_commitment: Optional[str] = None
+    amount_mentioned: Optional[float] = None
+
+
+class NLPInsights(BaseModel):
+    intent: IntentInsight
+    sentiment: SentimentInsight
+    obligation_strength: str = Field(..., description="strong | moderate | weak")
+    entities: Entities
+    contradictions_detected: bool
+
+
+class RiskSignals(BaseModel):
+    audio_trust_flags: list[str] = Field(default_factory=list)
+    behavioral_flags: list[str] = Field(default_factory=list)
+
+
+class RiskAssessment(BaseModel):
+    risk_score: int = Field(..., ge=0, le=100)
+    fraud_likelihood: str = Field(..., description="low | medium | high")
+    confidence: float = Field(..., ge=0.0, le=1.0)
+
+
+class CallRiskInput(BaseModel):
+    """Main input schema — the full payload from NLP service."""
+    call_context: CallContext
+    speaker_analysis: SpeakerAnalysis
+    nlp_insights: NLPInsights
+    risk_signals: RiskSignals
+    risk_assessment: RiskAssessment
+    summary_for_rag: str = Field(..., min_length=10)
+
+
+# ============================================================
+# OUTPUT MODELS (RAG Service → Caller)
+# ============================================================
+
+class RAGOutput(BaseModel):
+    grounded_assessment: str = Field(..., description="high_risk | medium_risk | low_risk")
+    explanation: str
+    recommended_action: str = Field(
+        ...,
+        description="auto_clear | flag_for_review | manual_review | escalate_to_compliance"
+    )
+    confidence: float = Field(..., ge=0.0, le=1.0)
+    regulatory_flags: list[str] = Field(default_factory=list)
+    matched_patterns: list[str] = Field(default_factory=list)
+
+
+class CallAnalysisResponse(BaseModel):
+    """Final API response returned to the caller."""
+    call_id: str
+    call_timestamp: datetime
+    input_risk_assessment: RiskAssessment
+    rag_output: RAGOutput

@@ -1,255 +1,265 @@
-# Financial Audio Intelligence — Execution Plan
+# Financial Audio Intelligence — Execution Plan (v2)
 
 ## Document Purpose
 
-This file is the **implementation blueprint** for the RAG pipeline.
-It covers architecture, execution flow, folder structure, tech stack,
-API contracts, database schema, and step-by-step build order.
+This is the **implementation blueprint** for the RAG service.
+Architecture was pivoted from customer-centric memory to **call-centric risk grounding**.
 
 Refer to `Rules.md` for project context and design principles.
 
 ---
 
-# 1. Tech Stack
+# 1. Architecture Summary
+
+**Old approach:** Track customer history → predict repayment risk over time.
+**New approach:** Treat each call as an independent risk event → ground signals against known patterns.
+
+RAG is a **legal + fraud-aware reasoning assistant**, not a database.
+
+### What RAG Does
+
+1. Grounds risk signals against known fraud/compliance patterns
+2. Converts NLP signals into explainable, auditor-friendly narratives
+3. Validates (never overrides) the risk assessment from NLP
+4. Recommends policy-aware actions
+5. Ensures regulatory-safe language
+
+### What RAG Does NOT Do
+
+- Extract intent
+- Detect sentiment
+- Compute risk scores
+- Detect contradictions
+- Analyze raw transcript
+- Remember customers
+- Make final business decisions
+
+---
+
+# 2. Tech Stack
 
 | Layer              | Technology                          |
 | ------------------ | ----------------------------------- |
-| Language           | Python 3.10.11                      |
+| Language           | Python 3.13.5                       |
 | Framework          | FastAPI                             |
 | Database           | Supabase (PostgreSQL + pgvector)    |
 | Embedding Model    | OpenAI `text-embedding-3-small`     |
 | LLM Reasoning      | OpenAI `gpt-4o` / `gpt-4o-mini`   |
 | Vector Search      | pgvector (cosine similarity)        |
 | Environment        | `.env` with `dotenv`                |
-| Deployment         | Local / Docker / Cloud              |
 
 ---
 
-# 2. Folder Structure
+# 3. Folder Structure
 
 ```
 VoiceOPs_Rag_Pipeline/
 │
-├── Rules.md                    # Project context (source of truth)
-├── EXECUTION_PLAN.md           # This file (implementation blueprint)
-├── .env                        # Environment variables
-├── requirements.txt            # Python dependencies
-├── main.py                     # FastAPI app entry point
+├── Rules.md
+├── EXECUTION_PLAN.md
+├── .env
+├── .gitignore
+├── requirements.txt
+├── main.py                         # FastAPI entry point
 │
 ├── app/
 │   ├── __init__.py
 │   │
 │   ├── api/
 │   │   ├── __init__.py
-│   │   └── routes.py           # API endpoints
+│   │   └── routes.py               # API endpoints
 │   │
 │   ├── models/
 │   │   ├── __init__.py
-│   │   └── schemas.py          # Pydantic models (input/output)
+│   │   └── schemas.py              # Pydantic models (input/output)
 │   │
 │   ├── services/
 │   │   ├── __init__.py
-│   │   ├── ingestion.py        # Step 1-2: receive + store metadata + obligations
-│   │   ├── embedding.py        # Step 3-4: generate + store embeddings
-│   │   ├── retrieval.py        # Step 5: history + semantic + obligation retrieval
-│   │   ├── context_builder.py  # Step 6: build reasoning context
-│   │   ├── reasoning.py        # Step 7: LLM risk reasoning
-│   │   └── updater.py          # Step 8: update call record
+│   │   ├── ingestion.py            # Step 1-2: validate + store call
+│   │   ├── embedding.py            # Step 3: embed summary_for_rag
+│   │   ├── retrieval.py            # Step 4: retrieve knowledge chunks
+│   │   ├── context_builder.py      # Step 5: build grounding context
+│   │   ├── reasoning.py            # Step 6: LLM grounded reasoning
+│   │   └── updater.py              # Step 7: store RAG output
 │   │
 │   ├── db/
 │   │   ├── __init__.py
-│   │   ├── supabase_client.py  # Supabase connection
-│   │   └── queries.py          # SQL + vector queries
+│   │   ├── supabase_client.py      # Supabase connection
+│   │   └── queries.py              # SQL + vector queries
 │   │
 │   └── utils/
 │       ├── __init__.py
-│       ├── id_generator.py     # Auto-generate call_id
-│       └── helpers.py          # Shared utilities
+│       ├── id_generator.py         # Auto-generate call_id
+│       └── helpers.py              # Shared utilities
+│
+├── knowledge/
+│   ├── fraud_patterns.json         # Curated fraud pattern documents
+│   ├── compliance_rules.json       # Regulatory guidance documents
+│   └── risk_heuristics.json        # Risk heuristic documents
 │
 └── sql/
-    └── init.sql                # Table creation scripts
+    └── init.sql                    # Table creation scripts
 ```
 
 ---
 
-# 3. Input Contract (Revised)
-
-The RAG service receives this payload from Person-1 service:
+# 4. Input Contract (NLP Service → RAG Service)
 
 ```json
 {
-  "resolved_identity": {
-    "loan_id": "LN102",
-    "customer_id": "CUST45"
+  "call_context": {
+    "call_language": "hinglish",
+    "call_quality": {
+      "noise_level": "medium",
+      "call_stability": "low",
+      "speech_naturalness": "suspicious"
+    }
   },
 
-  "cleaned_transcript": "salary late aaya emi pay nahi ho paaya next week kar dunga",
+  "speaker_analysis": {
+    "customer_only_analysis": true,
+    "agent_influence_detected": false
+  },
 
-  "primary_insights": {
+  "nlp_insights": {
     "intent": {
-      "label": "repayment_delay",
-      "confidence": 0.92,
-      "conditionality": "medium"
+      "label": "repayment_promise",
+      "confidence": 0.6,
+      "conditionality": "high"
     },
-
     "sentiment": {
       "label": "stressed",
-      "confidence": 0.88
+      "confidence": 0.82
     },
-
+    "obligation_strength": "weak",
     "entities": {
       "payment_commitment": "next_week",
       "amount_mentioned": null
     },
+    "contradictions_detected": true
+  },
 
-    "risk_indicators": [
-      "missed_emi",
-      "salary_delay"
+  "risk_signals": {
+    "audio_trust_flags": [
+      "low_call_stability",
+      "unnatural_speech_pattern"
+    ],
+    "behavioral_flags": [
+      "conditional_commitment",
+      "evasive_responses",
+      "statement_contradiction"
     ]
   },
 
-  "summary_for_embedding": "Customer missed EMI due to salary delay and promised to make payment next week."
+  "risk_assessment": {
+    "risk_score": 78,
+    "fraud_likelihood": "high",
+    "confidence": 0.81
+  },
+
+  "summary_for_rag": "Customer made a conditional repayment promise, showed stress, and contradicted earlier statements, which aligns with known high-risk call patterns."
 }
 ```
 
 ### Key Design Decisions on Input
 
-| Field               | Source         | Notes                                      |
-| ------------------- | -------------- | ------------------------------------------ |
-| `call_id`           | Auto-generated | RAG service generates using timestamp + UUID |
-| `call_timestamp`    | Auto-generated | Server UTC time at ingestion               |
-| `loan_id`           | Input payload  | Nested under `resolved_identity` (nullable) |
-| `customer_id`       | Input payload  | Nested under `resolved_identity` (nullable) |
-| `cleaned_transcript`| Input payload  | Stored in metadata, NOT embedded           |
-| `intent`            | Input payload  | Object: `label` + `confidence` + `conditionality` |
-| `sentiment`         | Input payload  | Object: `label` + `confidence`             |
-| `primary_insights`  | Input payload  | Stored as JSONB in `calls` table           |
-| `summary_for_embedding` | Input payload | This text gets embedded into pgvector  |
+| Field                | Source         | Notes                                                     |
+| -------------------- | -------------- | --------------------------------------------------------- |
+| `call_id`            | Auto-generated | RAG service generates: `call_{date}_{short_uuid}`         |
+| `call_timestamp`     | Auto-generated | Server UTC time at ingestion                              |
+| `call_context`       | NLP service    | Language + audio quality metadata                         |
+| `speaker_analysis`   | NLP service    | Who was analyzed, agent influence flag                     |
+| `nlp_insights`       | NLP service    | Intent, sentiment, entities — RAG does NOT recompute      |
+| `risk_signals`       | NLP service    | Audio + behavioral flags — RAG grounds these              |
+| `risk_assessment`    | NLP service    | Score + fraud likelihood — RAG validates, never overrides  |
+| `summary_for_rag`    | NLP service    | Embedded for knowledge retrieval — the RAG query text      |
 
 ---
 
-# 4. Output Contract
-
-The RAG service returns:
+# 5. Output Contract
 
 ```json
 {
-  "call_id": "call_2026_02_08_a1b2c3",
-  "loan_id": "LN102",
-  "customer_id": "CUST45",
-  "call_timestamp": "2026-02-08T14:30:00Z",
+  "call_id": "call_2026_02_09_a1b2c3",
+  "call_timestamp": "2026-02-09T14:30:00Z",
 
-  "current_insights": {
-    "intent": {
-      "label": "repayment_delay",
-      "confidence": 0.92,
-      "conditionality": "medium"
-    },
-    "sentiment": {
-      "label": "stressed",
-      "confidence": 0.88
-    },
-    "risk_indicators": ["missed_emi", "salary_delay"]
+  "input_risk_assessment": {
+    "risk_score": 78,
+    "fraud_likelihood": "high",
+    "confidence": 0.81
   },
 
-  "obligation_analysis": {
-    "current_commitment": {
-      "type": "payment_promise",
-      "detail": "next_week",
-      "amount": null,
-      "conditionality": "medium"
-    },
-    "past_commitments": [
-      {
-        "call_id": "call_2026_01_25_d4e5f6",
-        "commitment": "pay by month end",
-        "fulfilled": false
-      }
-    ],
-    "fulfillment_rate": 0.33,
-    "broken_promises_count": 2
-  },
-
-  "risk_assessment": {
-    "risk_level": "HIGH",
-    "explanation": "Customer has delayed EMI payments in 3 recent calls. Salary delay is a recurring reason. Payment commitments were made but not fulfilled in prior interactions. Commitment fulfillment rate is 33%.",
+  "rag_output": {
+    "grounded_assessment": "high_risk",
+    "explanation": "The call exhibits multiple high-risk indicators. The customer made a conditional repayment promise with high conditionality and weak obligation strength, which matches documented patterns of unreliable commitments. Statement contradictions were detected, a behavioral flag commonly associated with evasive debtors. Audio analysis flagged unnatural speech patterns and low call stability, which may indicate call manipulation. These signals collectively align with known fraud-adjacent call patterns.",
+    "recommended_action": "manual_review",
     "confidence": 0.85,
-    "regulatory_flags": []
-  },
-
-  "history_used": {
-    "timeline_calls_retrieved": 3,
-    "semantic_matches_retrieved": 2
+    "regulatory_flags": [],
+    "matched_patterns": [
+      "conditional_commitment_with_contradiction",
+      "weak_obligation_with_evasion",
+      "audio_quality_anomaly"
+    ]
   }
 }
 ```
 
 ---
 
-# 5. Database Schema
+# 6. Database Schema
 
-## Table: `calls`
+## Table: `call_analyses`
+
+Stores each call as an independent risk event with RAG output.
 
 ```sql
-CREATE TABLE calls (
-    call_id         TEXT PRIMARY KEY,
-    loan_id         TEXT,
-    customer_id     TEXT,
-    call_timestamp  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    cleaned_transcript TEXT,
-    extracted_insights JSONB,
-    summary         TEXT,
-    final_risk      JSONB,
-    created_at      TIMESTAMPTZ DEFAULT NOW()
+CREATE TABLE call_analyses (
+    call_id             TEXT PRIMARY KEY,
+    call_timestamp      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    call_context        JSONB,
+    speaker_analysis    JSONB,
+    nlp_insights        JSONB,
+    risk_signals        JSONB,
+    risk_assessment     JSONB,
+    summary_for_rag     TEXT,
+    rag_output          JSONB,
+    created_at          TIMESTAMPTZ DEFAULT NOW()
 );
 
-CREATE INDEX idx_calls_loan_id ON calls (loan_id);
-CREATE INDEX idx_calls_timestamp ON calls (call_timestamp DESC);
+CREATE INDEX idx_call_analyses_timestamp ON call_analyses (call_timestamp DESC);
 ```
 
-## Table: `call_embeddings`
+## Table: `knowledge_embeddings`
+
+Curated knowledge base for fraud patterns, compliance rules, and risk heuristics.
 
 ```sql
 CREATE EXTENSION IF NOT EXISTS vector;
 
-CREATE TABLE call_embeddings (
-    embedding_id    TEXT PRIMARY KEY,
-    call_id         TEXT REFERENCES calls(call_id),
-    loan_id         TEXT NOT NULL,
+CREATE TABLE knowledge_embeddings (
+    doc_id          TEXT PRIMARY KEY,
+    category        TEXT NOT NULL,
+    title           TEXT NOT NULL,
+    content         TEXT NOT NULL,
     embedding       vector(1536),
-    summary_text    TEXT,
+    metadata        JSONB,
     created_at      TIMESTAMPTZ DEFAULT NOW()
 );
 
-CREATE INDEX idx_embeddings_loan_id ON call_embeddings (loan_id);
+CREATE INDEX idx_knowledge_category ON knowledge_embeddings (category);
 ```
 
-## Table: `obligations`
+### Knowledge Categories
 
-```sql
-CREATE TABLE obligations (
-    obligation_id     TEXT PRIMARY KEY,
-    call_id           TEXT REFERENCES calls(call_id),
-    loan_id           TEXT,
-    commitment_type   TEXT NOT NULL,
-    commitment_detail TEXT,
-    amount            NUMERIC,
-    due_context       TEXT,
-    conditionality    TEXT,
-    fulfilled         BOOLEAN DEFAULT NULL,
-    fulfilled_by_call TEXT REFERENCES calls(call_id),
-    created_at        TIMESTAMPTZ DEFAULT NOW()
-);
-
-CREATE INDEX idx_obligations_loan_id ON obligations (loan_id);
-CREATE INDEX idx_obligations_fulfilled ON obligations (fulfilled);
-```
+| Category        | Purpose                                          | Example                                              |
+| --------------- | ------------------------------------------------ | ---------------------------------------------------- |
+| `fraud_pattern` | Known fraud call behaviors and red flags          | "Conditional promises followed by contradictions..."  |
+| `compliance`    | Regulatory rules and required phrasing            | "RBI guidelines on verbal commitment recording..."    |
+| `risk_heuristic`| Risk scoring logic and interpretation guidance    | "Risk score above 70 with weak obligation = HIGH..."  |
 
 ---
 
-# 6. Execution Flow (Step-by-Step)
-
-Below is the exact runtime sequence when a request hits the RAG service.
+# 7. Execution Flow (Step-by-Step)
 
 ---
 
@@ -257,76 +267,65 @@ Below is the exact runtime sequence when a request hits the RAG service.
 
 **File:** `app/api/routes.py` → `app/models/schemas.py`
 
-- FastAPI POST endpoint receives the JSON payload
-- Pydantic validates the input against `CallInsightsInput` schema
+- FastAPI POST endpoint receives the JSON payload from NLP service
+- Pydantic validates against `CallRiskInput` schema
 - If validation fails → return 422
 
 **Auto-generated fields:**
-- `call_id` = `call_{date}_{short_uuid}` (e.g., `call_2026_02_08_a1b2c3`)
+- `call_id` = `call_{date}_{short_uuid}`
 - `call_timestamp` = current UTC time
 
 **Expected Input:**
 ```json
 {
-  "resolved_identity": {
-    "loan_id": "LN102",
-    "customer_id": "CUST45"
-  },
-  "cleaned_transcript": "salary late aaya emi pay nahi ho paaya next week kar dunga",
-  "primary_insights": {
-    "intent": { "label": "repayment_delay", "confidence": 0.92, "conditionality": "medium" },
-    "sentiment": { "label": "stressed", "confidence": 0.88 },
+  "call_context": { "call_language": "hinglish", "call_quality": { "noise_level": "medium", "call_stability": "low", "speech_naturalness": "suspicious" } },
+  "speaker_analysis": { "customer_only_analysis": true, "agent_influence_detected": false },
+  "nlp_insights": {
+    "intent": { "label": "repayment_promise", "confidence": 0.6, "conditionality": "high" },
+    "sentiment": { "label": "stressed", "confidence": 0.82 },
+    "obligation_strength": "weak",
     "entities": { "payment_commitment": "next_week", "amount_mentioned": null },
-    "risk_indicators": ["missed_emi", "salary_delay"]
+    "contradictions_detected": true
   },
-  "summary_for_embedding": "Customer missed EMI due to salary delay and promised to make payment next week."
+  "risk_signals": {
+    "audio_trust_flags": ["low_call_stability", "unnatural_speech_pattern"],
+    "behavioral_flags": ["conditional_commitment", "evasive_responses", "statement_contradiction"]
+  },
+  "risk_assessment": { "risk_score": 78, "fraud_likelihood": "high", "confidence": 0.81 },
+  "summary_for_rag": "Customer made a conditional repayment promise, showed stress, and contradicted earlier statements."
 }
 ```
 
-**Expected Output:**
+**Expected Output (internal, passed to Step 2):**
 ```json
 {
-  "call_id": "call_2026_02_08_a1b2c3",
-  "call_timestamp": "2026-02-08T14:30:00Z",
-  "validated_payload": { "...full input payload..." },
+  "call_id": "call_2026_02_09_a1b2c3",
+  "call_timestamp": "2026-02-09T14:30:00Z",
+  "validated_payload": { "...full input..." },
   "status": "validated"
 }
 ```
 
 ---
 
-## Step 2 — Store Metadata + Track Obligations
+## Step 2 — Store Call Record
 
 **File:** `app/services/ingestion.py`
 
-- Extract `loan_id` and `customer_id` from `resolved_identity` (handle null)
-- Insert into `calls` table:
-  - `call_id` (generated)
-  - `loan_id`
-  - `customer_id`
-  - `call_timestamp` (generated)
-  - `cleaned_transcript`
-  - `extracted_insights` = full `primary_insights` as JSONB
-  - `summary` = `summary_for_embedding`
-  - `final_risk` = NULL (updated later in Step 8)
-- If `payment_commitment` exists in entities → insert into `obligations` table
-- Check previous unfulfilled obligations for this loan → attempt auto-resolution
+- Insert the full call data into `call_analyses` table
+- `rag_output` = NULL (populated after Step 7)
 
 **Expected Input:**
 ```json
 {
-  "call_id": "call_2026_02_08_a1b2c3",
-  "loan_id": "LN102",
-  "customer_id": "CUST45",
-  "call_timestamp": "2026-02-08T14:30:00Z",
-  "cleaned_transcript": "salary late aaya emi pay nahi ho paaya next week kar dunga",
-  "extracted_insights": {
-    "intent": { "label": "repayment_delay", "confidence": 0.92, "conditionality": "medium" },
-    "sentiment": { "label": "stressed", "confidence": 0.88 },
-    "entities": { "payment_commitment": "next_week", "amount_mentioned": null },
-    "risk_indicators": ["missed_emi", "salary_delay"]
-  },
-  "summary": "Customer missed EMI due to salary delay and promised to make payment next week."
+  "call_id": "call_2026_02_09_a1b2c3",
+  "call_timestamp": "2026-02-09T14:30:00Z",
+  "call_context": { "..." },
+  "speaker_analysis": { "..." },
+  "nlp_insights": { "..." },
+  "risk_signals": { "..." },
+  "risk_assessment": { "..." },
+  "summary_for_rag": "Customer made a conditional repayment promise..."
 }
 ```
 
@@ -334,128 +333,76 @@ Below is the exact runtime sequence when a request hits the RAG service.
 ```json
 {
   "inserted": true,
-  "call_id": "call_2026_02_08_a1b2c3",
-  "table": "calls",
-  "obligation_tracked": {
-    "obligation_id": "obl_uuid_abc",
-    "commitment_type": "payment_promise",
-    "commitment_detail": "next_week",
-    "conditionality": "medium"
-  },
-  "past_obligations_checked": 2,
-  "auto_resolved": 0
+  "call_id": "call_2026_02_09_a1b2c3",
+  "table": "call_analyses"
 }
 ```
 
 ---
 
-## Step 3 — Generate Embedding
+## Step 3 — Embed Summary for Knowledge Retrieval
 
 **File:** `app/services/embedding.py`
 
-- Take `summary_for_embedding` text
+- Take `summary_for_rag` text
 - Call OpenAI embedding API (`text-embedding-3-small`)
-- Returns a 1536-dim vector
+- This embedding is used to QUERY the knowledge base (not stored permanently)
 
 **Expected Input:**
 ```json
 {
-  "text": "Customer missed EMI due to salary delay and promised to make payment next week."
+  "text": "Customer made a conditional repayment promise, showed stress, and contradicted earlier statements."
 }
 ```
 
 **Expected Output:**
 ```json
 {
-  "embedding": [0.0123, -0.0456, 0.0789, "...1536 floats total..."]
+  "query_embedding": [0.0123, -0.0456, 0.0789, "...1536 floats..."]
 }
 ```
 
 ---
 
-## Step 4 — Store Vector Memory
-
-**File:** `app/services/embedding.py`
-
-- Insert into `call_embeddings` table:
-  - `embedding_id` = generated UUID
-  - `call_id` = from Step 1
-  - `loan_id` = from input
-  - `embedding` = vector from Step 3
-  - `summary_text` = `summary_for_embedding`
-
-**Expected Input:**
-```json
-{
-  "embedding_id": "emb_uuid_xyz",
-  "call_id": "call_2026_02_08_a1b2c3",
-  "loan_id": "LN102",
-  "embedding": [0.0123, -0.0456, "...1536 floats..."],
-  "summary_text": "Customer missed EMI due to salary delay and promised to make payment next week."
-}
-```
-
-**Expected Output:**
-```json
-{
-  "inserted": true,
-  "embedding_id": "emb_uuid_xyz",
-  "table": "call_embeddings"
-}
-```
-
----
-
-## Step 5 — Retrieve History + Obligations
+## Step 4 — Retrieve Knowledge Chunks
 
 **File:** `app/services/retrieval.py`
 
-Three retrieval strategies:
+Semantic search against the curated knowledge base.
 
-### 5A — Loan Timeline Retrieval (SQL)
-
-```sql
-SELECT call_id, extracted_insights, summary, final_risk, call_timestamp
-FROM calls
-WHERE loan_id = :loan_id
-  AND call_id != :current_call_id
-ORDER BY call_timestamp DESC
-LIMIT 5;
-```
-
-Purpose: Get the last N calls for this loan to detect repeated behavior.
-
-### 5B — Semantic Retrieval (pgvector)
+### 4A — Fraud Pattern Retrieval
 
 ```sql
-SELECT summary_text, 1 - (embedding <=> :query_embedding) AS similarity
-FROM call_embeddings
-WHERE loan_id = :loan_id
-  AND call_id != :current_call_id
+SELECT doc_id, title, content, 1 - (embedding <=> :query_embedding) AS similarity
+FROM knowledge_embeddings
+WHERE category = 'fraud_pattern'
 ORDER BY embedding <=> :query_embedding
 LIMIT 3;
 ```
 
-Purpose: Find semantically similar past situations for this loan.
-
-### 5C — Obligation History Retrieval (SQL)
+### 4B — Compliance Guidance Retrieval
 
 ```sql
-SELECT obligation_id, call_id, commitment_type, commitment_detail,
-       amount, conditionality, fulfilled, created_at
-FROM obligations
-WHERE loan_id = :loan_id
-ORDER BY created_at DESC
-LIMIT 10;
+SELECT doc_id, title, content, 1 - (embedding <=> :query_embedding) AS similarity
+FROM knowledge_embeddings
+WHERE category = 'compliance'
+ORDER BY embedding <=> :query_embedding
+LIMIT 2;
 ```
 
-Purpose: Get all past commitments and their fulfillment status.
+### 4C — Risk Heuristic Retrieval
+
+```sql
+SELECT doc_id, title, content, 1 - (embedding <=> :query_embedding) AS similarity
+FROM knowledge_embeddings
+WHERE category = 'risk_heuristic'
+ORDER BY embedding <=> :query_embedding
+LIMIT 2;
+```
 
 **Expected Input:**
 ```json
 {
-  "loan_id": "LN102",
-  "current_call_id": "call_2026_02_08_a1b2c3",
   "query_embedding": [0.0123, -0.0456, "...1536 floats..."]
 }
 ```
@@ -463,50 +410,34 @@ Purpose: Get all past commitments and their fulfillment status.
 **Expected Output:**
 ```json
 {
-  "timeline_calls": [
+  "fraud_patterns": [
     {
-      "call_id": "call_2026_01_25_d4e5f6",
-      "call_timestamp": "2026-01-25T11:00:00Z",
-      "extracted_insights": { "intent": { "label": "repayment_delay", "confidence": 0.85, "conditionality": "high" }, "sentiment": { "label": "neutral", "confidence": 0.75 } },
-      "summary": "Customer requested EMI extension due to medical expenses.",
-      "final_risk": { "risk_level": "MEDIUM", "confidence": 0.72 }
+      "doc_id": "fp_001",
+      "title": "Conditional Promise with Contradiction",
+      "content": "When a customer makes a payment promise with high conditionality and contradicts prior statements, this is a strong indicator of unreliable commitment. Historical data shows 73% of such calls result in non-payment.",
+      "similarity": 0.92
     },
     {
-      "call_id": "call_2026_01_18_g7h8i9",
-      "call_timestamp": "2026-01-18T09:30:00Z",
-      "extracted_insights": { "intent": { "label": "partial_payment", "confidence": 0.90, "conditionality": "low" }, "sentiment": { "label": "cooperative", "confidence": 0.82 } },
-      "summary": "Customer made partial payment and committed remaining by month end.",
-      "final_risk": { "risk_level": "LOW", "confidence": 0.65 }
-    }
-  ],
-  "semantic_matches": [
-    {
-      "summary_text": "Customer delayed EMI citing salary issues and promised next week.",
-      "similarity": 0.91
-    },
-    {
-      "summary_text": "Customer missed EMI and blamed late salary credit.",
+      "doc_id": "fp_004",
+      "title": "Evasive Response Pattern",
+      "content": "Customers who give evasive responses while under stress and avoid direct answers about payment timelines exhibit a documented fraud-adjacent behavior pattern.",
       "similarity": 0.87
     }
   ],
-  "obligation_history": [
+  "compliance_docs": [
     {
-      "obligation_id": "obl_uuid_prev1",
-      "call_id": "call_2026_01_25_d4e5f6",
-      "commitment_type": "payment_promise",
-      "commitment_detail": "by_month_end",
-      "amount": null,
-      "conditionality": "high",
-      "fulfilled": false
-    },
+      "doc_id": "comp_012",
+      "title": "Verbal Commitment Assessment Guidelines",
+      "content": "Verbal commitments with high conditionality should not be treated as binding agreements. Assessors must note conditionality level and recommend verification.",
+      "similarity": 0.85
+    }
+  ],
+  "risk_heuristics": [
     {
-      "obligation_id": "obl_uuid_prev2",
-      "call_id": "call_2026_01_10_j1k2l3",
-      "commitment_type": "payment_promise",
-      "commitment_detail": "next_week",
-      "amount": 5000,
-      "conditionality": "low",
-      "fulfilled": true
+      "doc_id": "rh_003",
+      "title": "High Risk Score Interpretation",
+      "content": "Risk scores above 70 combined with weak obligation strength and behavioral flags indicate high risk. Recommended action: manual review with compliance escalation if fraud likelihood exceeds 0.7.",
+      "similarity": 0.89
     }
   ]
 }
@@ -514,138 +445,147 @@ Purpose: Get all past commitments and their fulfillment status.
 
 ---
 
-## Step 6 — Build Reasoning Context
+## Step 5 — Build Grounding Context
 
 **File:** `app/services/context_builder.py`
 
-Construct a structured prompt context from:
+Construct a structured prompt from:
 
-1. **Current call insights** — intent, sentiment, entities, risk indicators
-2. **Timeline history** — last N calls with their insights and outcomes
-3. **Semantic matches** — similar past situations and their outcomes
-4. **Obligation history** — past commitments and fulfillment rates
+1. **Call signals** — risk flags, NLP insights, risk score
+2. **Retrieved knowledge** — fraud patterns, compliance rules, heuristics
 
 **Expected Input:**
 ```json
 {
-  "current_insights": {
-    "loan_id": "LN102",
-    "intent": { "label": "repayment_delay", "confidence": 0.92, "conditionality": "medium" },
-    "sentiment": { "label": "stressed", "confidence": 0.88 },
-    "entities": { "payment_commitment": "next_week", "amount_mentioned": null },
-    "risk_indicators": ["missed_emi", "salary_delay"],
-    "summary": "Customer missed EMI due to salary delay and promised to make payment next week."
+  "call_signals": {
+    "nlp_insights": { "...from input..." },
+    "risk_signals": { "...from input..." },
+    "risk_assessment": { "...from input..." },
+    "call_context": { "...from input..." },
+    "summary": "..."
   },
-  "timeline_calls": [ "...from Step 5A..." ],
-  "semantic_matches": [ "...from Step 5B..." ],
-  "obligation_history": [ "...from Step 5C..." ]
+  "knowledge_chunks": {
+    "fraud_patterns": [ "...from Step 4A..." ],
+    "compliance_docs": [ "...from Step 4B..." ],
+    "risk_heuristics": [ "...from Step 4C..." ]
+  }
 }
 ```
 
 **Expected Output (formatted context string):**
 
 ```
-=== CURRENT CALL ===
-Loan ID: LN102
-Intent: repayment_delay (confidence: 0.92, conditionality: medium)
-Sentiment: stressed (confidence: 0.88)
-Risk Indicators: missed_emi, salary_delay
-Summary: Customer missed EMI due to salary delay and promised to make payment next week.
+=== CALL SIGNALS ===
+Summary: Customer made a conditional repayment promise, showed stress, and contradicted earlier statements.
+Intent: repayment_promise (confidence: 0.60, conditionality: high)
+Sentiment: stressed (confidence: 0.82)
+Obligation Strength: weak
+Contradictions Detected: YES
+Audio Flags: low_call_stability, unnatural_speech_pattern
+Behavioral Flags: conditional_commitment, evasive_responses, statement_contradiction
+Risk Score: 78 | Fraud Likelihood: high | Confidence: 0.81
 
-=== RECENT CALL HISTORY (Last 5) ===
-[1] 2026-01-25 | Intent: repayment_delay (0.85, high) | Risk: MEDIUM | Summary: Customer requested EMI extension due to medical expenses.
-[2] 2026-01-18 | Intent: partial_payment (0.90, low) | Risk: LOW | Summary: Customer made partial payment and committed remaining by month end.
+=== MATCHED FRAUD PATTERNS ===
+[1] (0.92) Conditional Promise with Contradiction
+    When a customer makes a payment promise with high conditionality and contradicts prior statements, this is a strong indicator of unreliable commitment.
 
-=== OBLIGATION TRACKER ===
-Total commitments: 3 | Fulfilled: 1 | Broken: 2 | Fulfillment rate: 33%
-[1] 2026-01-25 | Promise: pay by month end | Fulfilled: NO
-[2] 2026-01-10 | Promise: pay next week (₹5000) | Fulfilled: YES
-[3] 2025-12-20 | Promise: pay by salary date | Fulfilled: NO
+[2] (0.87) Evasive Response Pattern
+    Customers who give evasive responses while under stress and avoid direct answers about payment timelines exhibit a documented fraud-adjacent behavior pattern.
 
-=== SIMILAR PAST SITUATIONS ===
-[1] Similarity: 0.91 | Summary: Customer delayed EMI citing salary issues and promised next week.
-[2] Similarity: 0.87 | Summary: Customer missed EMI and blamed late salary credit.
+=== COMPLIANCE GUIDANCE ===
+[1] (0.85) Verbal Commitment Assessment Guidelines
+    Verbal commitments with high conditionality should not be treated as binding agreements.
+
+=== RISK HEURISTICS ===
+[1] (0.89) High Risk Score Interpretation
+    Risk scores above 70 combined with weak obligation strength and behavioral flags indicate high risk. Recommended action: manual review.
 ```
 
 ---
 
-## Step 7 — LLM Risk Reasoning
+## Step 6 — LLM Grounded Reasoning
 
 **File:** `app/services/reasoning.py`
 
-- Send the built context to OpenAI GPT-4o
-- System prompt instructs the LLM to act as a financial risk analyst
-- LLM returns structured output
+- Send context to OpenAI GPT-4o
+- LLM grounds signals against retrieved knowledge
+- LLM does NOT override risk score — it explains and validates
 
 **Expected Input:**
 ```json
 {
-  "system_prompt": "You are a financial risk analyst...",
-  "context": "=== CURRENT CALL ===\nLoan ID: LN102\nIntent: repayment_delay\n...full context from Step 6..."
+  "system_prompt": "You are a financial risk grounding assistant...",
+  "context": "=== CALL SIGNALS ===\n...full context from Step 5..."
 }
 ```
 
 **Expected Output:**
 ```json
 {
-  "risk_level": "HIGH",
-  "explanation": "Customer has delayed EMI payments in 3 recent calls. Salary delay is a recurring reason. Payment commitments were made but not fulfilled in prior interactions. Commitment fulfillment rate is 33% (1 of 3 promises kept). Current promise has medium conditionality.",
+  "grounded_assessment": "high_risk",
+  "explanation": "The call exhibits multiple high-risk indicators. The customer made a conditional repayment promise with high conditionality and weak obligation strength, which matches documented patterns of unreliable commitments. Statement contradictions were detected, a behavioral flag commonly associated with evasive debtors. Audio analysis flagged unnatural speech patterns and low call stability, which may indicate call manipulation. These signals collectively align with known fraud-adjacent call patterns.",
+  "recommended_action": "manual_review",
   "confidence": 0.85,
-  "regulatory_flags": []
+  "regulatory_flags": [],
+  "matched_patterns": [
+    "conditional_commitment_with_contradiction",
+    "weak_obligation_with_evasion",
+    "audio_quality_anomaly"
+  ]
 }
 ```
 
-**System Prompt (core idea):**
+**System Prompt:**
 
 ```
-You are a financial risk analyst. Based on the current call insights,
-historical interaction data, and obligation fulfillment history,
-assess the repayment risk for this loan.
+You are a financial risk grounding assistant. Your role is to interpret
+call-level risk signals by grounding them against known fraud patterns,
+compliance rules, and risk heuristics.
 
 You MUST return a JSON object with:
-- risk_level: one of HIGH, MEDIUM, LOW
-- explanation: concise reasoning citing specific evidence from history
-  and obligation fulfillment rates
-- confidence: a float between 0.0 and 1.0
-- regulatory_flags: array of strings if any regulatory concerns detected
-  (e.g. "threatening_language", "unauthorized_disclosure", "missing_consent")
-  or empty array if none
+- grounded_assessment: one of "high_risk", "medium_risk", "low_risk"
+- explanation: human-readable, auditor-friendly narrative explaining WHY
+  the signals match or don't match known patterns. Cite specific patterns.
+- recommended_action: one of "auto_clear", "flag_for_review", "manual_review",
+  "escalate_to_compliance"
+- confidence: float 0.0–1.0 representing grounding confidence
+- regulatory_flags: array of regulatory concerns (empty if none)
+- matched_patterns: array of pattern names that matched
 
-Pay special attention to:
-- Commitment fulfillment rate (broken promises = higher risk)
-- Conditionality of current intent (high conditionality = less reliable)
-- Patterns of repeated excuses across calls
-- Whether amounts mentioned match or decrease over time
-
-Be objective. Use evidence from the call history. If no history exists,
-base your assessment on current call indicators only.
+RULES:
+- You MUST NOT override the risk score from the NLP service
+- You MUST NOT extract new intent, sentiment, or entities
+- You MUST NOT use accusatory language ("fraudster", "liar", "criminal")
+- You MUST use terms like: "high-risk indicators", "unreliable commitment",
+  "requires verification", "fraud-adjacent pattern"
+- If signals are ambiguous, say so and recommend manual review
+- If no patterns match, state that clearly and lower confidence
+- Base your reasoning ONLY on the provided signals and retrieved knowledge
 ```
 
 ---
 
-## Step 8 — Update Call Record
+## Step 7 — Store RAG Output
 
 **File:** `app/services/updater.py`
 
-- Update the `calls` table:
-
 ```sql
-UPDATE calls
-SET final_risk = :risk_assessment_json
+UPDATE call_analyses
+SET rag_output = :rag_output_json
 WHERE call_id = :call_id;
 ```
-
-- `final_risk` stores the complete risk assessment JSONB.
 
 **Expected Input:**
 ```json
 {
-  "call_id": "call_2026_02_08_a1b2c3",
-  "risk_assessment": {
-    "risk_level": "HIGH",
-    "explanation": "Customer has delayed EMI payments in 3 recent calls. Salary delay is a recurring reason. Commitment fulfillment rate is 33%.",
+  "call_id": "call_2026_02_09_a1b2c3",
+  "rag_output": {
+    "grounded_assessment": "high_risk",
+    "explanation": "...",
+    "recommended_action": "manual_review",
     "confidence": 0.85,
-    "regulatory_flags": []
+    "regulatory_flags": [],
+    "matched_patterns": ["conditional_commitment_with_contradiction"]
   }
 }
 ```
@@ -654,92 +594,61 @@ WHERE call_id = :call_id;
 ```json
 {
   "updated": true,
-  "call_id": "call_2026_02_08_a1b2c3",
-  "table": "calls",
-  "field": "final_risk"
+  "call_id": "call_2026_02_09_a1b2c3",
+  "table": "call_analyses",
+  "field": "rag_output"
 }
 ```
 
 ---
 
-## Step 9 — Return Response
+## Step 8 — Return Response
 
 **File:** `app/api/routes.py`
 
-- Assemble the final response object
-- Return to caller (frontend / n8n / Person-1 service)
-
-**Expected Input (assembled internally from all previous steps):**
-```
-call_id, loan_id, customer_id, call_timestamp,
-current_insights, risk_assessment, history_used counts
-```
+Assemble and return the final response.
 
 **Expected Output (final API response):**
 ```json
 {
-  "call_id": "call_2026_02_08_a1b2c3",
-  "loan_id": "LN102",
-  "customer_id": "CUST45",
-  "call_timestamp": "2026-02-08T14:30:00Z",
+  "call_id": "call_2026_02_09_a1b2c3",
+  "call_timestamp": "2026-02-09T14:30:00Z",
 
-  "current_insights": {
-    "intent": {
-      "label": "repayment_delay",
-      "confidence": 0.92,
-      "conditionality": "medium"
-    },
-    "sentiment": {
-      "label": "stressed",
-      "confidence": 0.88
-    },
-    "risk_indicators": ["missed_emi", "salary_delay"]
+  "input_risk_assessment": {
+    "risk_score": 78,
+    "fraud_likelihood": "high",
+    "confidence": 0.81
   },
 
-  "obligation_analysis": {
-    "current_commitment": {
-      "type": "payment_promise",
-      "detail": "next_week",
-      "amount": null,
-      "conditionality": "medium"
-    },
-    "past_commitments": [
-      { "call_id": "call_2026_01_25_d4e5f6", "commitment": "pay by month end", "fulfilled": false },
-      { "call_id": "call_2026_01_10_j1k2l3", "commitment": "pay next week", "fulfilled": true }
-    ],
-    "fulfillment_rate": 0.33,
-    "broken_promises_count": 2
-  },
-
-  "risk_assessment": {
-    "risk_level": "HIGH",
-    "explanation": "Customer has delayed EMI payments in 3 recent calls. Salary delay is a recurring reason. Commitment fulfillment rate is 33%. Current promise has medium conditionality.",
+  "rag_output": {
+    "grounded_assessment": "high_risk",
+    "explanation": "The call exhibits multiple high-risk indicators...",
+    "recommended_action": "manual_review",
     "confidence": 0.85,
-    "regulatory_flags": []
-  },
-
-  "history_used": {
-    "timeline_calls_retrieved": 2,
-    "semantic_matches_retrieved": 2,
-    "obligations_retrieved": 3
+    "regulatory_flags": [],
+    "matched_patterns": [
+      "conditional_commitment_with_contradiction",
+      "weak_obligation_with_evasion",
+      "audio_quality_anomaly"
+    ]
   }
 }
 ```
 
 ---
 
-# 7. API Endpoints
+# 8. API Endpoints
 
-| Method | Path                  | Description                       |
-| ------ | --------------------- | --------------------------------- |
-| POST   | `/api/v1/process-call`| Main pipeline — ingest + analyze  |
-| GET    | `/api/v1/loan/{loan_id}/history` | Get call history for a loan |
-| GET    | `/api/v1/call/{call_id}` | Get single call details        |
-| GET    | `/health`             | Health check                      |
+| Method | Path                          | Description                              |
+| ------ | ----------------------------- | ---------------------------------------- |
+| POST   | `/api/v1/analyze-call`        | Main pipeline — ground + assess          |
+| GET    | `/api/v1/call/{call_id}`      | Get single call analysis                 |
+| POST   | `/api/v1/knowledge/seed`      | Seed knowledge base (one-time setup)     |
+| GET    | `/health`                     | Health check                             |
 
 ---
 
-# 8. Environment Variables
+# 9. Environment Variables
 
 ```env
 # Supabase
@@ -750,60 +659,91 @@ SUPABASE_KEY=your_service_role_key
 OPENAI_API_KEY=sk-xxx
 
 # App Config
-TIMELINE_RETRIEVAL_LIMIT=5
-SEMANTIC_RETRIEVAL_LIMIT=3
+FRAUD_PATTERN_RETRIEVAL_LIMIT=3
+COMPLIANCE_RETRIEVAL_LIMIT=2
+RISK_HEURISTIC_RETRIEVAL_LIMIT=2
 EMBEDDING_MODEL=text-embedding-3-small
 LLM_MODEL=gpt-4o-mini
 ```
 
 ---
 
-# 9. Build Order (Implementation Sequence)
+# 10. Knowledge Base Seeding
 
-This is the order in which to build and test:
+The knowledge base must be populated ONCE before the pipeline works.
 
-| Phase | Task                                  | Files                          |
-| ----- | ------------------------------------- | ------------------------------ |
-| 1     | Project setup + dependencies          | `requirements.txt`, `.env`     |
-| 2     | Pydantic schemas (input/output)       | `app/models/schemas.py`        |
-| 3     | Supabase client + SQL init            | `app/db/`, `sql/init.sql`      |
-| 4     | Ingestion service (store metadata)    | `app/services/ingestion.py`    |
-| 5     | Embedding service (generate + store)  | `app/services/embedding.py`    |
-| 6     | Retrieval service (SQL + vector)      | `app/services/retrieval.py`    |
-| 7     | Context builder                       | `app/services/context_builder.py` |
-| 8     | LLM reasoning                        | `app/services/reasoning.py`    |
-| 9     | Updater service                       | `app/services/updater.py`      |
-| 10    | API routes (wire everything)          | `app/api/routes.py`, `main.py` |
-| 11    | Testing + debugging                   | Manual / Postman / curl        |
-| 12    | Optional: Backboard AI integration    | —                              |
+### Seeding Process
 
----
+1. Read JSON files from `knowledge/` directory
+2. Embed each document using OpenAI
+3. Insert into `knowledge_embeddings` table
 
-# 10. Error Handling Strategy
+### Document Format (in JSON files)
 
-| Error Type            | Action                                    |
-| --------------------- | ----------------------------------------- |
-| Invalid input payload | Return 422 with validation errors         |
-| Supabase insert fails | Return 500, log error                     |
-| Embedding API fails   | Retry once, then return 500               |
-| No history found      | Proceed with current-call-only reasoning  |
-| LLM fails             | Retry once, then return fallback risk     |
-| Vector search fails   | Fall back to SQL-only retrieval           |
+```json
+[
+  {
+    "doc_id": "fp_001",
+    "category": "fraud_pattern",
+    "title": "Conditional Promise with Contradiction",
+    "content": "When a customer makes a payment promise with high conditionality and contradicts prior statements, this is a strong indicator of unreliable commitment. Historical data shows 73% of such calls result in non-payment.",
+    "metadata": { "severity": "high", "source": "internal_audit_2025" }
+  }
+]
+```
 
 ---
 
-# 11. Testing Checklist
+# 11. Build Order (Implementation Sequence)
 
-- [ ] POST valid payload → 200 with risk assessment
+| Phase | Task                                      | Files                              |
+| ----- | ----------------------------------------- | ---------------------------------- |
+| 1     | Project setup + dependencies              | `requirements.txt`, `.env` ✅ DONE  |
+| 2     | Pydantic schemas (input/output)           | `app/models/schemas.py`            |
+| 3     | Supabase client + SQL init                | `app/db/`, `sql/init.sql`          |
+| 4     | Knowledge base JSON + seeding service     | `knowledge/`, seeding endpoint     |
+| 5     | Ingestion service (store call)            | `app/services/ingestion.py`        |
+| 6     | Embedding service (embed summary)         | `app/services/embedding.py`        |
+| 7     | Retrieval service (knowledge search)      | `app/services/retrieval.py`        |
+| 8     | Context builder                           | `app/services/context_builder.py`  |
+| 9     | LLM reasoning                            | `app/services/reasoning.py`        |
+| 10    | Updater service                           | `app/services/updater.py`          |
+| 11    | API routes (wire everything)              | `app/api/routes.py`, `main.py`     |
+| 12    | Testing + debugging                       | Manual / Postman / curl            |
+
+---
+
+# 12. Error Handling Strategy
+
+| Error Type                | Action                                        |
+| ------------------------- | --------------------------------------------- |
+| Invalid input payload     | Return 422 with validation errors             |
+| Supabase insert fails     | Return 500, log error                         |
+| Embedding API fails       | Retry once, then return 500                   |
+| No knowledge matches      | Proceed with signals-only reasoning           |
+| LLM fails                 | Retry once, then return fallback assessment    |
+| Knowledge base empty      | Return 503 (service not ready)                |
+
+---
+
+# 13. Testing Checklist
+
+- [ ] POST valid payload → 200 with grounded assessment
 - [ ] POST invalid payload → 422 validation error
-- [ ] First call for a loan (no history) → reasoning works
-- [ ] Multiple calls for same loan → history retrieved correctly
-- [ ] Semantic search returns relevant matches
-- [ ] Risk level is one of HIGH / MEDIUM / LOW
-- [ ] Explanation references actual history
+- [ ] Knowledge base seeded with fraud patterns
+- [ ] Semantic search returns relevant knowledge chunks
+- [ ] Grounded assessment is one of high_risk / medium_risk / low_risk
+- [ ] Explanation cites specific matched patterns
+- [ ] recommended_action is policy-appropriate
 - [ ] Confidence is between 0.0 and 1.0
-- [ ] `calls` table updated with `final_risk`
-- [ ] `call_embeddings` table has correct vectors
+- [ ] No accusatory language in explanation
+- [ ] `call_analyses` table updated with `rag_output`
+
+---
+
+# 14. One-Line Explanation
+
+> "RAG grounds call-level risk signals against known fraud patterns and regulatory guidance, turning raw model outputs into explainable and defensible assessments."
 
 ---
 

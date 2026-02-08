@@ -11,7 +11,7 @@ load_dotenv()
 
 app = FastAPI(
     title="Financial Audio Intelligence — RAG Service",
-    description="Memory + Reasoning pipeline for financial call analysis",
+    description="Call-centric risk grounding pipeline for financial call analysis",
     version="1.0.0",
 )
 
