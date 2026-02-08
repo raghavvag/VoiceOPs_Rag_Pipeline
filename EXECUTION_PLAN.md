@@ -49,9 +49,9 @@ VoiceOPs_Rag_Pipeline/
 │   │
 │   ├── services/
 │   │   ├── __init__.py
-│   │   ├── ingestion.py        # Step 1-2: receive + store metadata
+│   │   ├── ingestion.py        # Step 1-2: receive + store metadata + obligations
 │   │   ├── embedding.py        # Step 3-4: generate + store embeddings
-│   │   ├── retrieval.py        # Step 5: history + semantic retrieval
+│   │   ├── retrieval.py        # Step 5: history + semantic + obligation retrieval
 │   │   ├── context_builder.py  # Step 6: build reasoning context
 │   │   ├── reasoning.py        # Step 7: LLM risk reasoning
 │   │   └── updater.py          # Step 8: update call record
@@ -78,7 +78,7 @@ The RAG service receives this payload from Person-1 service:
 
 ```json
 {
-  "extracted_identity": {
+  "resolved_identity": {
     "loan_id": "LN102",
     "customer_id": "CUST45"
   },
@@ -86,8 +86,16 @@ The RAG service receives this payload from Person-1 service:
   "cleaned_transcript": "salary late aaya emi pay nahi ho paaya next week kar dunga",
 
   "primary_insights": {
-    "intent": "repayment_delay",
-    "sentiment": "stressed",
+    "intent": {
+      "label": "repayment_delay",
+      "confidence": 0.92,
+      "conditionality": "medium"
+    },
+
+    "sentiment": {
+      "label": "stressed",
+      "confidence": 0.88
+    },
 
     "entities": {
       "payment_commitment": "next_week",
@@ -110,9 +118,11 @@ The RAG service receives this payload from Person-1 service:
 | ------------------- | -------------- | ------------------------------------------ |
 | `call_id`           | Auto-generated | RAG service generates using timestamp + UUID |
 | `call_timestamp`    | Auto-generated | Server UTC time at ingestion               |
-| `loan_id`           | Input payload  | Nested under `extracted_identity`          |
-| `customer_id`       | Input payload  | Nested under `extracted_identity`          |
+| `loan_id`           | Input payload  | Nested under `resolved_identity` (nullable) |
+| `customer_id`       | Input payload  | Nested under `resolved_identity` (nullable) |
 | `cleaned_transcript`| Input payload  | Stored in metadata, NOT embedded           |
+| `intent`            | Input payload  | Object: `label` + `confidence` + `conditionality` |
+| `sentiment`         | Input payload  | Object: `label` + `confidence`             |
 | `primary_insights`  | Input payload  | Stored as JSONB in `calls` table           |
 | `summary_for_embedding` | Input payload | This text gets embedded into pgvector  |
 
@@ -130,15 +140,41 @@ The RAG service returns:
   "call_timestamp": "2026-02-08T14:30:00Z",
 
   "current_insights": {
-    "intent": "repayment_delay",
-    "sentiment": "stressed",
+    "intent": {
+      "label": "repayment_delay",
+      "confidence": 0.92,
+      "conditionality": "medium"
+    },
+    "sentiment": {
+      "label": "stressed",
+      "confidence": 0.88
+    },
     "risk_indicators": ["missed_emi", "salary_delay"]
+  },
+
+  "obligation_analysis": {
+    "current_commitment": {
+      "type": "payment_promise",
+      "detail": "next_week",
+      "amount": null,
+      "conditionality": "medium"
+    },
+    "past_commitments": [
+      {
+        "call_id": "call_2026_01_25_d4e5f6",
+        "commitment": "pay by month end",
+        "fulfilled": false
+      }
+    ],
+    "fulfillment_rate": 0.33,
+    "broken_promises_count": 2
   },
 
   "risk_assessment": {
     "risk_level": "HIGH",
-    "explanation": "Customer has delayed EMI payments in 3 recent calls. Salary delay is a recurring reason. Payment commitments were made but not fulfilled in prior interactions.",
-    "confidence": 0.85
+    "explanation": "Customer has delayed EMI payments in 3 recent calls. Salary delay is a recurring reason. Payment commitments were made but not fulfilled in prior interactions. Commitment fulfillment rate is 33%.",
+    "confidence": 0.85,
+    "regulatory_flags": []
   },
 
   "history_used": {
@@ -157,8 +193,8 @@ The RAG service returns:
 ```sql
 CREATE TABLE calls (
     call_id         TEXT PRIMARY KEY,
-    loan_id         TEXT NOT NULL,
-    customer_id     TEXT NOT NULL,
+    loan_id         TEXT,
+    customer_id     TEXT,
     call_timestamp  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     cleaned_transcript TEXT,
     extracted_insights JSONB,
@@ -188,6 +224,27 @@ CREATE TABLE call_embeddings (
 CREATE INDEX idx_embeddings_loan_id ON call_embeddings (loan_id);
 ```
 
+## Table: `obligations`
+
+```sql
+CREATE TABLE obligations (
+    obligation_id     TEXT PRIMARY KEY,
+    call_id           TEXT REFERENCES calls(call_id),
+    loan_id           TEXT,
+    commitment_type   TEXT NOT NULL,
+    commitment_detail TEXT,
+    amount            NUMERIC,
+    due_context       TEXT,
+    conditionality    TEXT,
+    fulfilled         BOOLEAN DEFAULT NULL,
+    fulfilled_by_call TEXT REFERENCES calls(call_id),
+    created_at        TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX idx_obligations_loan_id ON obligations (loan_id);
+CREATE INDEX idx_obligations_fulfilled ON obligations (fulfilled);
+```
+
 ---
 
 # 6. Execution Flow (Step-by-Step)
@@ -211,14 +268,14 @@ Below is the exact runtime sequence when a request hits the RAG service.
 **Expected Input:**
 ```json
 {
-  "extracted_identity": {
+  "resolved_identity": {
     "loan_id": "LN102",
     "customer_id": "CUST45"
   },
   "cleaned_transcript": "salary late aaya emi pay nahi ho paaya next week kar dunga",
   "primary_insights": {
-    "intent": "repayment_delay",
-    "sentiment": "stressed",
+    "intent": { "label": "repayment_delay", "confidence": 0.92, "conditionality": "medium" },
+    "sentiment": { "label": "stressed", "confidence": 0.88 },
     "entities": { "payment_commitment": "next_week", "amount_mentioned": null },
     "risk_indicators": ["missed_emi", "salary_delay"]
   },
@@ -238,11 +295,11 @@ Below is the exact runtime sequence when a request hits the RAG service.
 
 ---
 
-## Step 2 — Store Metadata
+## Step 2 — Store Metadata + Track Obligations
 
 **File:** `app/services/ingestion.py`
 
-- Extract `loan_id` and `customer_id` from `extracted_identity`
+- Extract `loan_id` and `customer_id` from `resolved_identity` (handle null)
 - Insert into `calls` table:
   - `call_id` (generated)
   - `loan_id`
@@ -252,6 +309,8 @@ Below is the exact runtime sequence when a request hits the RAG service.
   - `extracted_insights` = full `primary_insights` as JSONB
   - `summary` = `summary_for_embedding`
   - `final_risk` = NULL (updated later in Step 8)
+- If `payment_commitment` exists in entities → insert into `obligations` table
+- Check previous unfulfilled obligations for this loan → attempt auto-resolution
 
 **Expected Input:**
 ```json
@@ -262,8 +321,8 @@ Below is the exact runtime sequence when a request hits the RAG service.
   "call_timestamp": "2026-02-08T14:30:00Z",
   "cleaned_transcript": "salary late aaya emi pay nahi ho paaya next week kar dunga",
   "extracted_insights": {
-    "intent": "repayment_delay",
-    "sentiment": "stressed",
+    "intent": { "label": "repayment_delay", "confidence": 0.92, "conditionality": "medium" },
+    "sentiment": { "label": "stressed", "confidence": 0.88 },
     "entities": { "payment_commitment": "next_week", "amount_mentioned": null },
     "risk_indicators": ["missed_emi", "salary_delay"]
   },
@@ -276,7 +335,15 @@ Below is the exact runtime sequence when a request hits the RAG service.
 {
   "inserted": true,
   "call_id": "call_2026_02_08_a1b2c3",
-  "table": "calls"
+  "table": "calls",
+  "obligation_tracked": {
+    "obligation_id": "obl_uuid_abc",
+    "commitment_type": "payment_promise",
+    "commitment_detail": "next_week",
+    "conditionality": "medium"
+  },
+  "past_obligations_checked": 2,
+  "auto_resolved": 0
 }
 ```
 
@@ -339,11 +406,11 @@ Below is the exact runtime sequence when a request hits the RAG service.
 
 ---
 
-## Step 5 — Retrieve History
+## Step 5 — Retrieve History + Obligations
 
 **File:** `app/services/retrieval.py`
 
-Two parallel retrieval strategies:
+Three retrieval strategies:
 
 ### 5A — Loan Timeline Retrieval (SQL)
 
@@ -371,6 +438,19 @@ LIMIT 3;
 
 Purpose: Find semantically similar past situations for this loan.
 
+### 5C — Obligation History Retrieval (SQL)
+
+```sql
+SELECT obligation_id, call_id, commitment_type, commitment_detail,
+       amount, conditionality, fulfilled, created_at
+FROM obligations
+WHERE loan_id = :loan_id
+ORDER BY created_at DESC
+LIMIT 10;
+```
+
+Purpose: Get all past commitments and their fulfillment status.
+
 **Expected Input:**
 ```json
 {
@@ -387,14 +467,14 @@ Purpose: Find semantically similar past situations for this loan.
     {
       "call_id": "call_2026_01_25_d4e5f6",
       "call_timestamp": "2026-01-25T11:00:00Z",
-      "extracted_insights": { "intent": "repayment_delay", "sentiment": "neutral" },
+      "extracted_insights": { "intent": { "label": "repayment_delay", "confidence": 0.85, "conditionality": "high" }, "sentiment": { "label": "neutral", "confidence": 0.75 } },
       "summary": "Customer requested EMI extension due to medical expenses.",
       "final_risk": { "risk_level": "MEDIUM", "confidence": 0.72 }
     },
     {
       "call_id": "call_2026_01_18_g7h8i9",
       "call_timestamp": "2026-01-18T09:30:00Z",
-      "extracted_insights": { "intent": "partial_payment", "sentiment": "cooperative" },
+      "extracted_insights": { "intent": { "label": "partial_payment", "confidence": 0.90, "conditionality": "low" }, "sentiment": { "label": "cooperative", "confidence": 0.82 } },
       "summary": "Customer made partial payment and committed remaining by month end.",
       "final_risk": { "risk_level": "LOW", "confidence": 0.65 }
     }
@@ -407,6 +487,26 @@ Purpose: Find semantically similar past situations for this loan.
     {
       "summary_text": "Customer missed EMI and blamed late salary credit.",
       "similarity": 0.87
+    }
+  ],
+  "obligation_history": [
+    {
+      "obligation_id": "obl_uuid_prev1",
+      "call_id": "call_2026_01_25_d4e5f6",
+      "commitment_type": "payment_promise",
+      "commitment_detail": "by_month_end",
+      "amount": null,
+      "conditionality": "high",
+      "fulfilled": false
+    },
+    {
+      "obligation_id": "obl_uuid_prev2",
+      "call_id": "call_2026_01_10_j1k2l3",
+      "commitment_type": "payment_promise",
+      "commitment_detail": "next_week",
+      "amount": 5000,
+      "conditionality": "low",
+      "fulfilled": true
     }
   ]
 }
@@ -423,20 +523,22 @@ Construct a structured prompt context from:
 1. **Current call insights** — intent, sentiment, entities, risk indicators
 2. **Timeline history** — last N calls with their insights and outcomes
 3. **Semantic matches** — similar past situations and their outcomes
+4. **Obligation history** — past commitments and fulfillment rates
 
 **Expected Input:**
 ```json
 {
   "current_insights": {
     "loan_id": "LN102",
-    "intent": "repayment_delay",
-    "sentiment": "stressed",
+    "intent": { "label": "repayment_delay", "confidence": 0.92, "conditionality": "medium" },
+    "sentiment": { "label": "stressed", "confidence": 0.88 },
     "entities": { "payment_commitment": "next_week", "amount_mentioned": null },
     "risk_indicators": ["missed_emi", "salary_delay"],
     "summary": "Customer missed EMI due to salary delay and promised to make payment next week."
   },
   "timeline_calls": [ "...from Step 5A..." ],
-  "semantic_matches": [ "...from Step 5B..." ]
+  "semantic_matches": [ "...from Step 5B..." ],
+  "obligation_history": [ "...from Step 5C..." ]
 }
 ```
 
@@ -445,14 +547,20 @@ Construct a structured prompt context from:
 ```
 === CURRENT CALL ===
 Loan ID: LN102
-Intent: repayment_delay
-Sentiment: stressed
+Intent: repayment_delay (confidence: 0.92, conditionality: medium)
+Sentiment: stressed (confidence: 0.88)
 Risk Indicators: missed_emi, salary_delay
 Summary: Customer missed EMI due to salary delay and promised to make payment next week.
 
 === RECENT CALL HISTORY (Last 5) ===
-[1] 2026-01-25 | Intent: repayment_delay | Risk: MEDIUM | Summary: Customer requested EMI extension due to medical expenses.
-[2] 2026-01-18 | Intent: partial_payment | Risk: LOW | Summary: Customer made partial payment and committed remaining by month end.
+[1] 2026-01-25 | Intent: repayment_delay (0.85, high) | Risk: MEDIUM | Summary: Customer requested EMI extension due to medical expenses.
+[2] 2026-01-18 | Intent: partial_payment (0.90, low) | Risk: LOW | Summary: Customer made partial payment and committed remaining by month end.
+
+=== OBLIGATION TRACKER ===
+Total commitments: 3 | Fulfilled: 1 | Broken: 2 | Fulfillment rate: 33%
+[1] 2026-01-25 | Promise: pay by month end | Fulfilled: NO
+[2] 2026-01-10 | Promise: pay next week (₹5000) | Fulfilled: YES
+[3] 2025-12-20 | Promise: pay by salary date | Fulfilled: NO
 
 === SIMILAR PAST SITUATIONS ===
 [1] Similarity: 0.91 | Summary: Customer delayed EMI citing salary issues and promised next week.
@@ -481,21 +589,33 @@ Summary: Customer missed EMI due to salary delay and promised to make payment ne
 ```json
 {
   "risk_level": "HIGH",
-  "explanation": "Customer has delayed EMI payments in 3 recent calls. Salary delay is a recurring reason. Payment commitments were made but not fulfilled in prior interactions.",
-  "confidence": 0.85
+  "explanation": "Customer has delayed EMI payments in 3 recent calls. Salary delay is a recurring reason. Payment commitments were made but not fulfilled in prior interactions. Commitment fulfillment rate is 33% (1 of 3 promises kept). Current promise has medium conditionality.",
+  "confidence": 0.85,
+  "regulatory_flags": []
 }
 ```
 
 **System Prompt (core idea):**
 
 ```
-You are a financial risk analyst. Based on the current call insights
-and historical interaction data, assess the repayment risk for this loan.
+You are a financial risk analyst. Based on the current call insights,
+historical interaction data, and obligation fulfillment history,
+assess the repayment risk for this loan.
 
 You MUST return a JSON object with:
 - risk_level: one of HIGH, MEDIUM, LOW
 - explanation: concise reasoning citing specific evidence from history
+  and obligation fulfillment rates
 - confidence: a float between 0.0 and 1.0
+- regulatory_flags: array of strings if any regulatory concerns detected
+  (e.g. "threatening_language", "unauthorized_disclosure", "missing_consent")
+  or empty array if none
+
+Pay special attention to:
+- Commitment fulfillment rate (broken promises = higher risk)
+- Conditionality of current intent (high conditionality = less reliable)
+- Patterns of repeated excuses across calls
+- Whether amounts mentioned match or decrease over time
 
 Be objective. Use evidence from the call history. If no history exists,
 base your assessment on current call indicators only.
@@ -523,8 +643,9 @@ WHERE call_id = :call_id;
   "call_id": "call_2026_02_08_a1b2c3",
   "risk_assessment": {
     "risk_level": "HIGH",
-    "explanation": "Customer has delayed EMI payments in 3 recent calls. Salary delay is a recurring reason.",
-    "confidence": 0.85
+    "explanation": "Customer has delayed EMI payments in 3 recent calls. Salary delay is a recurring reason. Commitment fulfillment rate is 33%.",
+    "confidence": 0.85,
+    "regulatory_flags": []
   }
 }
 ```
@@ -561,19 +682,46 @@ current_insights, risk_assessment, history_used counts
   "loan_id": "LN102",
   "customer_id": "CUST45",
   "call_timestamp": "2026-02-08T14:30:00Z",
+
   "current_insights": {
-    "intent": "repayment_delay",
-    "sentiment": "stressed",
+    "intent": {
+      "label": "repayment_delay",
+      "confidence": 0.92,
+      "conditionality": "medium"
+    },
+    "sentiment": {
+      "label": "stressed",
+      "confidence": 0.88
+    },
     "risk_indicators": ["missed_emi", "salary_delay"]
   },
+
+  "obligation_analysis": {
+    "current_commitment": {
+      "type": "payment_promise",
+      "detail": "next_week",
+      "amount": null,
+      "conditionality": "medium"
+    },
+    "past_commitments": [
+      { "call_id": "call_2026_01_25_d4e5f6", "commitment": "pay by month end", "fulfilled": false },
+      { "call_id": "call_2026_01_10_j1k2l3", "commitment": "pay next week", "fulfilled": true }
+    ],
+    "fulfillment_rate": 0.33,
+    "broken_promises_count": 2
+  },
+
   "risk_assessment": {
     "risk_level": "HIGH",
-    "explanation": "Customer has delayed EMI payments in 3 recent calls. Salary delay is a recurring reason. Payment commitments were made but not fulfilled in prior interactions.",
-    "confidence": 0.85
+    "explanation": "Customer has delayed EMI payments in 3 recent calls. Salary delay is a recurring reason. Commitment fulfillment rate is 33%. Current promise has medium conditionality.",
+    "confidence": 0.85,
+    "regulatory_flags": []
   },
+
   "history_used": {
     "timeline_calls_retrieved": 2,
-    "semantic_matches_retrieved": 2
+    "semantic_matches_retrieved": 2,
+    "obligations_retrieved": 3
   }
 }
 ```
