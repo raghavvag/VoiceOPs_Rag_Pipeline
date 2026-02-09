@@ -49,13 +49,20 @@ def embed_text(text: str) -> list[float]:
 
     logger.info(f"Embedding text ({len(text)} chars) via {model}")
 
-    try:
-        response = client.embeddings.create(
-            input=text,
-            model=model,
-        )
-        embedding = response.data[0].embedding
-        return embedding
-    except Exception as e:
-        logger.error(f"OpenAI embedding failed: {str(e)}")
-        raise RuntimeError(f"OpenAI embedding failed: {str(e)}")
+    last_error = None
+    for attempt in range(2):
+        try:
+            response = client.embeddings.create(
+                input=text,
+                model=model,
+            )
+            embedding = response.data[0].embedding
+            return embedding
+        except Exception as e:
+            last_error = e
+            if attempt == 0:
+                logger.warning(f"Embedding attempt 1 failed, retrying: {str(e)}")
+            else:
+                logger.error(f"Embedding failed after 2 attempts: {str(e)}")
+
+    raise RuntimeError(f"OpenAI embedding failed after retry: {str(last_error)}")

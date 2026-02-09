@@ -32,6 +32,17 @@ async def analyze_call(payload: CallRiskInput):
     Steps 2-8 will be wired in as services are built.
     """
 
+    # --- Pre-check: Knowledge base must be seeded ---
+    try:
+        kb_count = get_knowledge_count()
+    except Exception:
+        kb_count = 0
+    if kb_count == 0:
+        raise HTTPException(
+            status_code=503,
+            detail="Knowledge base is empty. Run POST /api/v1/knowledge/seed first.",
+        )
+
     # --- Step 1: Receive & Validate ---
     # Pydantic already validated the payload at this point.
     # If we reached here, the input is valid.

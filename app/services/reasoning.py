@@ -79,19 +79,31 @@ def run_grounded_reasoning(grounding_context: str) -> dict:
 
     logger.info(f"Calling {model} with {len(grounding_context)} chars context")
 
-    try:
-        response = client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": grounding_context},
-            ],
-            temperature=0.2,
-            response_format={"type": "json_object"},
-        )
-    except Exception as e:
-        logger.error(f"LLM call failed: {str(e)}")
-        raise RuntimeError(f"LLM call failed: {str(e)}")
+    last_error = None
+    for attempt in range(2):
+        try:
+            response = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": grounding_context},
+                ],
+                temperature=0.2,
+                response_format={"type": "json_object"},
+            )
+            last_error = None
+            break
+        except Exception as e:
+            last_error = e
+            if attempt == 0:
+                logger.warning(f"LLM attempt 1 failed, retrying: {str(e)}")
+            else:
+                logger.error(f"LLM failed after 2 attempts: {str(e)}")
+
+    if last_error is not None:
+        return _fallback_assessment()
+
+    # noinspection PyUnboundLocalVariable
 
     raw = response.choices[0].message.content
     tokens_in = response.usage.prompt_tokens
@@ -142,3 +154,16 @@ def run_grounded_reasoning(grounding_context: str) -> dict:
         result["matched_patterns"] = []
 
     return result
+
+
+def _fallback_assessment() -> dict:
+    """Return a safe fallback when LLM is unavailable after retry."""
+    logger.warning("Returning fallback assessment (LLM unavailable)")
+    return {
+        "grounded_assessment": "high_risk",
+        "explanation": "Automated grounding was unavailable. This call has been flagged for manual review as a precaution. A human assessor should evaluate the risk signals directly.",
+        "recommended_action": "manual_review",
+        "confidence": 0.0,
+        "regulatory_flags": [],
+        "matched_patterns": [],
+    }
