@@ -5,7 +5,10 @@ Only connects when first called (not at import time).
 """
 
 import os
+import logging
 from supabase import create_client, Client
+
+logger = logging.getLogger("rag.db")
 
 _client: Client | None = None
 
@@ -28,5 +31,7 @@ def get_supabase_client() -> Client:
             "Get these from your Supabase project → Settings → API."
         )
 
+    logger.info(f"   Connecting to Supabase: {url[:40]}...")
     _client = create_client(url, key)
+    logger.info("   ✓ Supabase client connected")
     return _client

@@ -3,7 +3,10 @@ Database query functions for the RAG service.
 All Supabase table operations live here.
 """
 
+import logging
 from app.db.supabase_client import get_supabase_client
+
+logger = logging.getLogger("rag.queries")
 
 
 # ============================================================
@@ -41,12 +44,14 @@ def insert_call_record(
         # rag_output intentionally omitted — NULL until Step 7
     }
 
+    logger.info(f"   DB INSERT → call_analyses (call_id={call_id})")
     result = client.table("call_analyses").insert(row).execute()
 
     # Supabase Python client v2 returns data in result.data
     if not result.data:
         raise RuntimeError(f"Supabase insert returned no data for call_id={call_id}")
 
+    logger.info(f"   ✓ Insert successful")
     return {
         "inserted": True,
         "call_id": call_id,
@@ -96,3 +101,92 @@ def update_rag_output(call_id: str, rag_output: dict) -> dict:
         "table": "call_analyses",
         "field": "rag_output",
     }
+
+
+# ============================================================
+# knowledge_embeddings table operations
+# ============================================================
+
+def search_knowledge(
+    query_embedding: list[float],
+    category: str,
+    limit: int = 3,
+) -> list[dict]:
+    """
+    Perform vector similarity search against knowledge_embeddings
+    using the match_knowledge RPC function defined in init.sql.
+
+    Args:
+        query_embedding: 1536-dim query vector from Step 3.
+        category: One of 'fraud_pattern', 'compliance', 'risk_heuristic'.
+        limit: Max number of results to return.
+
+    Returns:
+        List of dicts with doc_id, title, content, similarity.
+    """
+    client = get_supabase_client()
+
+    logger.info(f"   DB RPC → match_knowledge (category={category}, limit={limit})")
+    result = client.rpc(
+        "match_knowledge",
+        {
+            "query_embedding": query_embedding,
+            "match_category": category,
+            "match_limit": limit,
+        },
+    ).execute()
+
+    if not result.data:
+        logger.info(f"   ⚠ No matches found for category={category}")
+        return []
+
+    logger.info(f"   ✓ {len(result.data)} matches found")
+    return result.data
+
+
+def upsert_knowledge_doc(
+    doc_id: str,
+    category: str,
+    title: str,
+    content: str,
+    embedding: list[float],
+    metadata: dict | None = None,
+) -> dict:
+    """
+    Insert or update a knowledge document with its embedding.
+    Used during knowledge base seeding.
+
+    Returns: {"upserted": True, "doc_id": "...", "table": "knowledge_embeddings"}
+    """
+    client = get_supabase_client()
+
+    row = {
+        "doc_id": doc_id,
+        "category": category,
+        "title": title,
+        "content": content,
+        "embedding": embedding,
+        "metadata": metadata or {},
+    }
+
+    result = (
+        client.table("knowledge_embeddings")
+        .upsert(row)
+        .execute()
+    )
+
+    if not result.data:
+        raise RuntimeError(f"Supabase upsert failed for doc_id={doc_id}")
+
+    return {
+        "upserted": True,
+        "doc_id": doc_id,
+        "table": "knowledge_embeddings",
+    }
+
+
+def get_knowledge_count() -> int:
+    """Return total number of documents in knowledge_embeddings."""
+    client = get_supabase_client()
+    result = client.table("knowledge_embeddings").select("doc_id", count="exact").execute()
+    return result.count or 0

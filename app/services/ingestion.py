@@ -3,9 +3,12 @@ Ingestion service — Step 2: Store Call Record.
 Takes validated payload + generated call_id/timestamp → inserts into call_analyses.
 """
 
+import logging
 from datetime import datetime
 from app.models.schemas import CallRiskInput
 from app.db.queries import insert_call_record
+
+logger = logging.getLogger("rag.ingestion")
 
 
 def store_call_record(
@@ -28,6 +31,8 @@ def store_call_record(
     Raises:
         RuntimeError: If Supabase insert fails
     """
+    logger.info(f"   Inserting call_id={call_id} into call_analyses...")
+
     result = insert_call_record(
         call_id=call_id,
         call_timestamp=call_timestamp.isoformat(),
@@ -39,4 +44,5 @@ def store_call_record(
         summary_for_rag=payload.summary_for_rag,
     )
 
+    logger.info(f"   Insert complete for call_id={call_id}")
     return result
