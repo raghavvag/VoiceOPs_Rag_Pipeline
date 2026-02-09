@@ -1,9 +1,6 @@
 """
 API routes for the RAG service.
-Step 1: Receive & Validate the NLP payload.
-Step 2: Store call record in Supabase.
-Step 3: Embed summary_for_rag for knowledge retrieval.
-Step 4: Retrieve knowledge chunks via semantic search.
+Steps 1-8: Full pipeline from validation to grounded assessment.
 """
 
 import logging
@@ -14,6 +11,8 @@ from app.services.ingestion import store_call_record
 from app.services.embedding import embed_text
 from app.services.retrieval import retrieve_knowledge_chunks
 from app.services.context_builder import build_grounding_context
+from app.services.reasoning import run_grounded_reasoning
+from app.services.updater import store_rag_output
 from app.services.seeding import seed_knowledge_base
 from app.db.queries import get_call_by_id, get_knowledge_count
 
@@ -93,25 +92,35 @@ async def analyze_call(payload: CallRiskInput):
             detail=f"Failed to build grounding context: {str(e)}",
         )
 
-    # TODO: Step 6 — LLM grounded reasoning (reasoning.py)
-    # TODO: Step 7 — Store RAG output (updater.py)
+    # --- Step 6: LLM Grounded Reasoning ---
+    try:
+        rag_output = run_grounded_reasoning(grounding_context)
+        logger.info(f"[{call_id}] STEP 6 | LLM done | assessment={rag_output['grounded_assessment']} action={rag_output['recommended_action']}")
+    except Exception as e:
+        logger.error(f"[{call_id}] STEP 6 | FAILED: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"LLM reasoning failed: {str(e)}",
+        )
 
-    # --- Step 8: Return Response ---
-    logger.info(f"[{call_id}] DONE | Steps 1-5 complete")
+    # --- Step 7: Store RAG Output ---
+    try:
+        update_result = store_rag_output(call_id=call_id, rag_output=rag_output)
+        logger.info(f"[{call_id}] STEP 7 | rag_output stored")
+    except Exception as e:
+        logger.error(f"[{call_id}] STEP 7 | FAILED: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to store RAG output: {str(e)}",
+        )
+
+    # --- Step 8: Return Final Response ---
+    logger.info(f"[{call_id}] DONE | Pipeline complete")
     return {
         "call_id": call_id,
         "call_timestamp": call_timestamp.isoformat(),
-        "status": "context_built",
         "input_risk_assessment": payload.risk_assessment.model_dump(),
-        "ingestion": ingestion_result,
-        "embedding_dim": len(query_embedding),
-        "knowledge_chunks": {
-            "fraud_patterns_count": len(knowledge_chunks["fraud_patterns"]),
-            "compliance_docs_count": len(knowledge_chunks["compliance_docs"]),
-            "risk_heuristics_count": len(knowledge_chunks["risk_heuristics"]),
-        },
-        "grounding_context": grounding_context,
-        "message": "Steps 1-5 complete. Pipeline steps 6-8 not yet wired.",
+        "rag_output": rag_output,
     }
 
 
