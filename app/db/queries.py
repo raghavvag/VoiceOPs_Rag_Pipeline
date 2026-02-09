@@ -222,3 +222,169 @@ def search_calls(
         },
     ).execute()
     return result.data if result.data else []
+
+
+# ============================================================
+# dashboard operations
+# ============================================================
+
+def get_dashboard_stats() -> dict:
+    """Call dashboard_stats() RPC — returns all KPI numbers."""
+    client = get_supabase_client()
+    logger.info("DB RPC dashboard_stats")
+    result = client.rpc("dashboard_stats", {}).execute()
+    return result.data if result.data else {}
+
+
+def get_recent_activity(limit: int = 5) -> list[dict]:
+    """Fetch last N completed calls for the activity timeline."""
+    client = get_supabase_client()
+    logger.info(f"DB SELECT recent_activity (limit={limit})")
+    result = (
+        client.table("call_analyses")
+        .select("call_id, call_timestamp, status, summary_for_rag, risk_assessment, rag_output")
+        .not_.is_("rag_output", "null")
+        .order("call_timestamp", desc=True)
+        .limit(limit)
+        .execute()
+    )
+    if not result.data:
+        return []
+
+    items = []
+    for row in result.data:
+        ra = row.get("risk_assessment") or {}
+        ro = row.get("rag_output") or {}
+        items.append({
+            "call_id": row["call_id"],
+            "call_timestamp": row["call_timestamp"],
+            "status": row.get("status", "open"),
+            "risk_score": ra.get("risk_score", 0),
+            "fraud_likelihood": ra.get("fraud_likelihood", "unknown"),
+            "grounded_assessment": ro.get("grounded_assessment", "unknown"),
+            "recommended_action": ro.get("recommended_action", "unknown"),
+            "summary": row.get("summary_for_rag", ""),
+        })
+    return items
+
+
+def get_top_patterns(limit: int = 10) -> list[dict]:
+    """Call top_patterns() RPC — aggregated pattern frequency."""
+    client = get_supabase_client()
+    logger.info(f"DB RPC top_patterns (limit={limit})")
+    result = client.rpc("top_patterns", {"pattern_limit": limit}).execute()
+    if not result.data:
+        return []
+    return [{"pattern": r["pattern"], "count": r["match_count"]} for r in result.data]
+
+
+def get_active_cases(limit: int = 3) -> tuple[list[dict], int]:
+    """
+    Fetch unresolved cases sorted by risk score descending.
+    Returns (cases_list, total_active_count).
+    """
+    client = get_supabase_client()
+    logger.info(f"DB SELECT active_cases (limit={limit})")
+
+    # Get total active count
+    count_result = (
+        client.table("call_analyses")
+        .select("call_id", count="exact")
+        .not_.is_("rag_output", "null")
+        .neq("status", "resolved")
+        .execute()
+    )
+    total_active = count_result.count or 0
+
+    # Get cases (fetch more than limit, sort in python by risk_score)
+    fetch_limit = max(limit * 3, 20)
+    result = (
+        client.table("call_analyses")
+        .select("call_id, call_timestamp, status, call_context, speaker_analysis, nlp_insights, risk_signals, risk_assessment, rag_output, summary_for_rag")
+        .not_.is_("rag_output", "null")
+        .neq("status", "resolved")
+        .order("call_timestamp", desc=True)
+        .limit(fetch_limit)
+        .execute()
+    )
+    if not result.data:
+        return [], total_active
+
+    # Sort by risk_score descending
+    cases = sorted(
+        result.data,
+        key=lambda c: (c.get("risk_assessment") or {}).get("risk_score", 0),
+        reverse=True,
+    )
+    return cases[:limit], total_active
+
+
+def update_call_status(call_id: str, status: str) -> dict | None:
+    """Update the status column for a call. Returns updated row or None."""
+    client = get_supabase_client()
+    logger.info(f"DB UPDATE status ({call_id} → {status})")
+    result = (
+        client.table("call_analyses")
+        .update({"status": status})
+        .eq("call_id", call_id)
+        .execute()
+    )
+    if result.data and len(result.data) > 0:
+        return result.data[0]
+    return None
+
+
+def get_calls_paginated(
+    page: int = 1,
+    limit: int = 10,
+    status_filter: str | None = None,
+    risk_filter: str | None = None,
+    sort: str = "recent",
+) -> tuple[list[dict], int]:
+    """
+    Paginated call listing with optional filters.
+    Returns (calls_list, total_count).
+    """
+    client = get_supabase_client()
+    offset = (page - 1) * limit
+    logger.info(f"DB SELECT calls (page={page} limit={limit} status={status_filter} risk={risk_filter} sort={sort})")
+
+    # Build count query
+    count_q = client.table("call_analyses").select("call_id", count="exact")
+    if status_filter:
+        count_q = count_q.eq("status", status_filter)
+    if risk_filter:
+        count_q = count_q.not_.is_("rag_output", "null")
+    count_result = count_q.execute()
+    total = count_result.count or 0
+
+    # Build data query
+    data_q = (
+        client.table("call_analyses")
+        .select("call_id, call_timestamp, status, call_context, speaker_analysis, nlp_insights, risk_signals, risk_assessment, rag_output, summary_for_rag")
+    )
+    if status_filter:
+        data_q = data_q.eq("status", status_filter)
+    if risk_filter:
+        data_q = data_q.not_.is_("rag_output", "null")
+
+    data_q = data_q.order("call_timestamp", desc=True).range(offset, offset + limit - 1)
+    result = data_q.execute()
+    calls = result.data if result.data else []
+
+    # If risk filter, filter in python (Supabase client can't filter JSONB easily)
+    if risk_filter:
+        calls = [
+            c for c in calls
+            if (c.get("rag_output") or {}).get("grounded_assessment") == risk_filter
+        ]
+
+    # If sort by risk, re-sort in python
+    if sort == "risk":
+        calls = sorted(
+            calls,
+            key=lambda c: (c.get("risk_assessment") or {}).get("risk_score", 0),
+            reverse=True,
+        )
+
+    return calls, total

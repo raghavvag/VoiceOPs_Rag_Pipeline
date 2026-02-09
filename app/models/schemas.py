@@ -148,3 +148,45 @@ class ChatResponse(BaseModel):
     answer: str
     sources: list[ChatSource] = Field(default_factory=list)
     metadata: ChatMetadata
+
+
+# ============================================================
+# DASHBOARD MODELS
+# ============================================================
+
+class DashboardStats(BaseModel):
+    total_calls: int = 0
+    total_calls_today: int = 0
+    high_risk_count: int = 0
+    medium_risk_count: int = 0
+    low_risk_count: int = 0
+    avg_risk_score: float = 0.0
+    resolution_rate: float = 0.0
+    status_breakdown: dict[str, int] = Field(default_factory=dict)
+
+
+class RecentActivityItem(BaseModel):
+    call_id: str
+    call_timestamp: datetime
+    status: str
+    risk_score: int
+    fraud_likelihood: str
+    grounded_assessment: str
+    recommended_action: str
+    summary: str
+
+
+class PatternCount(BaseModel):
+    pattern: str
+    count: int
+
+
+class StatusUpdate(BaseModel):
+    status: str = Field(..., pattern=r"^(open|in_review|escalated|resolved)$")
+
+
+class PaginationMeta(BaseModel):
+    page: int
+    limit: int
+    total: int
+    total_pages: int

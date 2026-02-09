@@ -4,8 +4,13 @@ Steps 1-8: Full pipeline from validation to grounded assessment.
 """
 
 import logging
-from fastapi import APIRouter, HTTPException
-from app.models.schemas import CallRiskInput, CallAnalysisResponse, ChatRequest, ChatResponse, ChatSource, ChatMetadata
+import math
+from fastapi import APIRouter, HTTPException, Query
+from app.models.schemas import (
+    CallRiskInput, CallAnalysisResponse,
+    ChatRequest, ChatResponse, ChatSource, ChatMetadata,
+    DashboardStats, RecentActivityItem, PatternCount, StatusUpdate, PaginationMeta,
+)
 from app.utils.id_generator import generate_call_id, generate_call_timestamp
 from app.services.ingestion import store_call_record
 from app.services.embedding import embed_text
@@ -17,7 +22,20 @@ from app.services.seeding import seed_knowledge_base
 from app.services.chat_retrieval import retrieve_for_chat, extract_call_ids, lookup_calls_by_id
 from app.services.chat_context import build_chat_context
 from app.services.chat_reasoning import run_chat_reasoning
-from app.db.queries import get_call_by_id, get_knowledge_count, update_call_embedding
+from app.db.queries import (
+    get_call_by_id, get_knowledge_count, update_call_embedding,
+    get_dashboard_stats, get_recent_activity, get_top_patterns,
+    get_active_cases, update_call_status, get_calls_paginated,
+)
+
+def status_from_risk_score(score: int) -> str:
+    """Derive initial case status from NLP risk_score."""
+    if score < 30:
+        return "resolved"
+    elif score <= 50:
+        return "in_review"
+    else:
+        return "escalated"
 
 logger = logging.getLogger("rag.routes")
 
@@ -133,6 +151,14 @@ async def analyze_call(payload: CallRiskInput):
             status_code=500,
             detail=f"Failed to store RAG output: {str(e)}",
         )
+
+    # --- Step 7b: Set initial status from risk_score ---
+    try:
+        initial_status = status_from_risk_score(payload.risk_assessment.risk_score)
+        update_call_status(call_id, initial_status)
+        logger.info(f"[{call_id}] STEP 7b | status={initial_status} (risk_score={payload.risk_assessment.risk_score})")
+    except Exception as e:
+        logger.warning(f"[{call_id}] STEP 7b | Status update failed (non-fatal): {str(e)}")
 
     # --- Step 8: Return Final Response ---
     logger.info(f"[{call_id}] DONE | Pipeline complete")
@@ -314,3 +340,161 @@ async def chat(request: ChatRequest):
             tokens_used=llm_result["tokens_used"],
         ),
     )
+
+
+# ============================================================
+# Dashboard Endpoints
+# ============================================================
+
+@router.get("/dashboard/stats", response_model=DashboardStats)
+async def dashboard_stats():
+    """KPI numbers for the hero stats row + risk distribution."""
+    try:
+        stats = get_dashboard_stats()
+    except Exception as e:
+        logger.error(f"DASHBOARD | stats failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to fetch stats: {str(e)}")
+
+    return DashboardStats(
+        total_calls=stats.get("total_calls", 0),
+        total_calls_today=stats.get("total_calls_today", 0),
+        high_risk_count=stats.get("high_risk_count", 0),
+        medium_risk_count=stats.get("medium_risk_count", 0),
+        low_risk_count=stats.get("low_risk_count", 0),
+        avg_risk_score=stats.get("avg_risk_score") or 0.0,
+        resolution_rate=stats.get("resolution_rate") or 0.0,
+        status_breakdown=stats.get("status_breakdown") or {},
+    )
+
+
+@router.get("/dashboard/recent-activity")
+async def dashboard_recent_activity(
+    limit: int = Query(default=5, ge=1, le=20),
+):
+    """Last N calls with outcomes for the activity timeline."""
+    try:
+        items = get_recent_activity(limit)
+    except Exception as e:
+        logger.error(f"DASHBOARD | recent-activity failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to fetch recent activity: {str(e)}")
+    return {"recent_activity": items}
+
+
+@router.get("/dashboard/top-patterns")
+async def dashboard_top_patterns(
+    limit: int = Query(default=10, ge=1, le=20),
+):
+    """Aggregated pattern frequency across all calls."""
+    try:
+        patterns = get_top_patterns(limit)
+    except Exception as e:
+        logger.error(f"DASHBOARD | top-patterns failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to fetch patterns: {str(e)}")
+    return {"patterns": patterns}
+
+
+@router.get("/dashboard/active-cases")
+async def dashboard_active_cases(
+    limit: int = Query(default=3, ge=1, le=10),
+):
+    """Top N highest-risk unresolved cases."""
+    try:
+        cases, total_active = get_active_cases(limit)
+    except Exception as e:
+        logger.error(f"DASHBOARD | active-cases failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to fetch active cases: {str(e)}")
+    return {"active_cases": cases, "total_active": total_active}
+
+
+@router.get("/dashboard/health")
+async def dashboard_health():
+    """System health indicator for dashboard status badge."""
+    db_ok = False
+    kb_count = 0
+    embedding_ok = False
+
+    # Check database
+    try:
+        kb_count = get_knowledge_count()
+        db_ok = True
+    except Exception:
+        pass
+
+    # Check embedding service
+    try:
+        embed_text("health check")
+        embedding_ok = True
+    except Exception:
+        pass
+
+    overall = "healthy" if (db_ok and kb_count > 0 and embedding_ok) else "degraded"
+    return {
+        "status": overall,
+        "components": {
+            "database": db_ok,
+            "knowledge_base": {"ready": kb_count > 0, "doc_count": kb_count},
+            "embedding_service": embedding_ok,
+        },
+    }
+
+
+# ============================================================
+# Case Management Endpoints
+# ============================================================
+
+@router.patch("/call/{call_id}/status")
+async def patch_call_status(call_id: str, body: StatusUpdate):
+    """Update case status (e.g., mark as resolved after review)."""
+    logger.info(f"PATCH status | {call_id} → {body.status}")
+
+    # Check call exists
+    existing = get_call_by_id(call_id)
+    if existing is None:
+        raise HTTPException(status_code=404, detail=f"Call not found: {call_id}")
+
+    try:
+        update_call_status(call_id, body.status)
+    except Exception as e:
+        logger.error(f"PATCH status failed for {call_id}: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to update status: {str(e)}")
+
+    return {"call_id": call_id, "status": body.status, "updated": True}
+
+
+@router.get("/calls")
+async def list_calls(
+    page: int = Query(default=1, ge=1),
+    limit: int = Query(default=10, ge=1, le=50),
+    status: str | None = Query(default=None),
+    risk: str | None = Query(default=None),
+    sort: str = Query(default="recent"),
+):
+    """Paginated call listing with optional filters."""
+    # Validate filter values
+    valid_statuses = {"open", "in_review", "escalated", "resolved"}
+    if status and status not in valid_statuses:
+        raise HTTPException(status_code=422, detail=f"Invalid status. Allowed: {valid_statuses}")
+
+    valid_risks = {"high_risk", "medium_risk", "low_risk"}
+    if risk and risk not in valid_risks:
+        raise HTTPException(status_code=422, detail=f"Invalid risk. Allowed: {valid_risks}")
+
+    try:
+        calls, total = get_calls_paginated(
+            page=page, limit=limit,
+            status_filter=status, risk_filter=risk, sort=sort,
+        )
+    except Exception as e:
+        logger.error(f"GET /calls failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to fetch calls: {str(e)}")
+
+    total_pages = math.ceil(total / limit) if total > 0 else 1
+    return {
+        "calls": calls,
+        "pagination": {
+            "page": page,
+            "limit": limit,
+            "total": total,
+            "total_pages": total_pages,
+        },
+    }
