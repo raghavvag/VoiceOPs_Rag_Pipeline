@@ -55,8 +55,31 @@ def build_chat_context(
             assessment = call.get("grounded_assessment", "pending")
             sim = call.get("similarity", 0)
             summary = call.get("summary_for_rag", "")
-            lines.append(f"[{i}] {cid} | risk={risk} | fraud={fraud} | assessment={assessment} | sim={sim:.2f}")
-            lines.append(f"    {summary}")
+            is_direct = call.get("_lookup", False)
+            lookup_tag = " [DIRECT LOOKUP]" if is_direct else ""
+
+            lines.append(f"[{i}] {cid} | risk={risk} | fraud={fraud} | assessment={assessment} | sim={sim:.2f}{lookup_tag}")
+            lines.append(f"    Summary: {summary}")
+
+            # If this is a direct lookup, include richer details
+            if is_direct and "_full_record" in call:
+                rec = call["_full_record"]
+                if isinstance(rec.get("rag_output"), dict):
+                    rag = rec["rag_output"]
+                    lines.append(f"    Explanation: {rag.get('explanation', 'N/A')}")
+                    lines.append(f"    Action: {rag.get('recommended_action', 'N/A')}")
+                    lines.append(f"    Confidence: {rag.get('confidence', 'N/A')}")
+                    patterns = rag.get("matched_patterns", [])
+                    if patterns:
+                        lines.append(f"    Matched Patterns: {', '.join(patterns)}")
+                    flags = rag.get("regulatory_flags", [])
+                    if flags:
+                        lines.append(f"    Regulatory Flags: {', '.join(flags)}")
+                if isinstance(rec.get("nlp_insights"), dict):
+                    nlp = rec["nlp_insights"]
+                    lines.append(f"    Intent: {nlp.get('intent', {}).get('label', '?')} (confidence={nlp.get('intent', {}).get('confidence', '?')})")
+                    lines.append(f"    Sentiment: {nlp.get('sentiment', {}).get('label', '?')}")
+
             lines.append("")
         sections.append("\n".join(lines))
 

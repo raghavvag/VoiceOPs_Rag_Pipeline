@@ -14,7 +14,7 @@ from app.services.context_builder import build_grounding_context
 from app.services.reasoning import run_grounded_reasoning
 from app.services.updater import store_rag_output
 from app.services.seeding import seed_knowledge_base
-from app.services.chat_retrieval import retrieve_for_chat
+from app.services.chat_retrieval import retrieve_for_chat, extract_call_ids, lookup_calls_by_id
 from app.services.chat_context import build_chat_context
 from app.services.chat_reasoning import run_chat_reasoning
 from app.db.queries import get_call_by_id, get_knowledge_count, update_call_embedding
@@ -228,6 +228,13 @@ async def chat(request: ChatRequest):
 
     logger.info(f"CHAT | Question: {request.question[:80]}...")
 
+    # --- Detect call IDs in question for direct lookup ---
+    mentioned_call_ids = extract_call_ids(request.question)
+    direct_lookups = []
+    if mentioned_call_ids:
+        direct_lookups = lookup_calls_by_id(mentioned_call_ids)
+        logger.info(f"CHAT | Direct call lookup: {len(direct_lookups)}/{len(mentioned_call_ids)} found")
+
     # --- Step 1: Embed the question ---
     try:
         query_embedding = embed_text(request.question)
@@ -250,6 +257,12 @@ async def chat(request: ChatRequest):
     except Exception as e:
         logger.error(f"CHAT | Retrieval failed: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Retrieval failed: {str(e)}")
+
+    # Merge direct lookups into call_docs (avoid duplicates)
+    existing_call_ids = {c.get("call_id") for c in retrieved["call_docs"]}
+    for lookup in direct_lookups:
+        if lookup["call_id"] not in existing_call_ids:
+            retrieved["call_docs"].append(lookup)
 
     # --- Step 3: Build chat context ---
     history_dicts = [msg.model_dump() for msg in request.conversation_history]

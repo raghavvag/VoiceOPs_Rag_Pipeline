@@ -5,6 +5,7 @@ Main entry point for the FastAPI application.
 
 import logging
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 from app.api.routes import router
 
@@ -23,6 +24,15 @@ app = FastAPI(
     title="Financial Audio Intelligence — RAG Service",
     description="Call-centric risk grounding pipeline for financial call analysis",
     version="2.0.0",
+)
+
+# Allow all CORS requests
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 # Register API routes
