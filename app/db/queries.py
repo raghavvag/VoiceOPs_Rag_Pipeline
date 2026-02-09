@@ -186,3 +186,39 @@ def get_knowledge_count() -> int:
     client = get_supabase_client()
     result = client.table("knowledge_embeddings").select("doc_id", count="exact").execute()
     return result.count or 0
+
+
+# ============================================================
+# chat operations (chatbot vector search)
+# ============================================================
+
+def update_call_embedding(call_id: str, embedding: list[float]) -> None:
+    """
+    Store the summary_for_rag embedding in call_analyses.
+    Called after Step 3 of the main pipeline so chatbot can vector-search calls.
+    """
+    client = get_supabase_client()
+    logger.info(f"DB UPDATE summary_embedding ({call_id})")
+    client.table("call_analyses").update(
+        {"summary_embedding": embedding}
+    ).eq("call_id", call_id).execute()
+
+
+def search_calls(
+    query_embedding: list[float],
+    limit: int = 3,
+) -> list[dict]:
+    """
+    Vector similarity search against call_analyses via match_calls RPC.
+    Returns past calls ranked by semantic similarity to the query.
+    """
+    client = get_supabase_client()
+    logger.info(f"DB RPC match_calls (limit={limit})")
+    result = client.rpc(
+        "match_calls",
+        {
+            "query_embedding": query_embedding,
+            "match_limit": limit,
+        },
+    ).execute()
+    return result.data if result.data else []

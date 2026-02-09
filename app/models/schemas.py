@@ -95,3 +95,56 @@ class CallAnalysisResponse(BaseModel):
     call_timestamp: datetime
     input_risk_assessment: RiskAssessment
     rag_output: RAGOutput
+
+
+# ============================================================
+# CHAT MODELS (Knowledge Query Chatbot)
+# ============================================================
+
+class ChatMessage(BaseModel):
+    """A single message in the conversation history."""
+    role: str = Field(..., description="user | assistant")
+    content: str = Field(..., min_length=1)
+
+
+class ChatFilters(BaseModel):
+    """Controls which data sources the chatbot searches."""
+    search_knowledge: bool = True
+    search_calls: bool = False
+    categories: list[str] = Field(
+        default=["fraud_pattern", "compliance", "risk_heuristic"],
+        description="Knowledge categories to search",
+    )
+    knowledge_limit: int = Field(default=5, ge=1, le=10)
+    calls_limit: int = Field(default=3, ge=1, le=10)
+
+
+class ChatRequest(BaseModel):
+    """Input schema for the chatbot endpoint."""
+    question: str = Field(..., min_length=5)
+    conversation_history: list[ChatMessage] = Field(default_factory=list)
+    filters: ChatFilters = Field(default_factory=ChatFilters)
+
+
+class ChatSource(BaseModel):
+    """A single source document cited in the chatbot answer."""
+    type: str = Field(..., description="knowledge | call")
+    doc_id: str
+    category: str
+    title: str
+    similarity: float
+
+
+class ChatMetadata(BaseModel):
+    """Metadata about the chatbot response."""
+    knowledge_docs_searched: int = 0
+    calls_searched: int = 0
+    model: str
+    tokens_used: int = 0
+
+
+class ChatResponse(BaseModel):
+    """Output schema for the chatbot endpoint."""
+    answer: str
+    sources: list[ChatSource] = Field(default_factory=list)
+    metadata: ChatMetadata

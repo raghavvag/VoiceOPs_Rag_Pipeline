@@ -5,7 +5,7 @@ Steps 1-8: Full pipeline from validation to grounded assessment.
 
 import logging
 from fastapi import APIRouter, HTTPException
-from app.models.schemas import CallRiskInput, CallAnalysisResponse
+from app.models.schemas import CallRiskInput, CallAnalysisResponse, ChatRequest, ChatResponse, ChatSource, ChatMetadata
 from app.utils.id_generator import generate_call_id, generate_call_timestamp
 from app.services.ingestion import store_call_record
 from app.services.embedding import embed_text
@@ -14,7 +14,10 @@ from app.services.context_builder import build_grounding_context
 from app.services.reasoning import run_grounded_reasoning
 from app.services.updater import store_rag_output
 from app.services.seeding import seed_knowledge_base
-from app.db.queries import get_call_by_id, get_knowledge_count
+from app.services.chat_retrieval import retrieve_for_chat
+from app.services.chat_context import build_chat_context
+from app.services.chat_reasoning import run_chat_reasoning
+from app.db.queries import get_call_by_id, get_knowledge_count, update_call_embedding
 
 logger = logging.getLogger("rag.routes")
 
@@ -77,6 +80,12 @@ async def analyze_call(payload: CallRiskInput):
             status_code=500,
             detail=f"Failed to embed summary: {str(e)}",
         )
+
+    # --- Step 3b: Store embedding for chatbot vector search ---
+    try:
+        update_call_embedding(call_id, query_embedding)
+    except Exception as e:
+        logger.warning(f"[{call_id}] STEP 3b | Embedding storage failed (non-fatal): {str(e)}")
 
     # --- Step 4: Retrieve Knowledge Chunks ---
     try:
@@ -192,3 +201,103 @@ async def get_call(call_id: str):
         )
 
     return record
+
+
+# ============================================================
+# Chatbot Endpoint
+# ============================================================
+
+@router.post("/chat", response_model=ChatResponse)
+async def chat(request: ChatRequest):
+    """
+    Knowledge query chatbot.
+    Accepts a natural language question, searches knowledge base + call history
+    via vector similarity, and returns a grounded answer with citations.
+    """
+    # --- Pre-check: Knowledge base must be seeded ---
+    if request.filters.search_knowledge:
+        try:
+            kb_count = get_knowledge_count()
+        except Exception:
+            kb_count = 0
+        if kb_count == 0:
+            raise HTTPException(
+                status_code=503,
+                detail="Knowledge base is empty. Run POST /api/v1/knowledge/seed first.",
+            )
+
+    logger.info(f"CHAT | Question: {request.question[:80]}...")
+
+    # --- Step 1: Embed the question ---
+    try:
+        query_embedding = embed_text(request.question)
+        logger.info(f"CHAT | Embedded question | dim={len(query_embedding)}")
+    except Exception as e:
+        logger.error(f"CHAT | Embedding failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to embed question: {str(e)}")
+
+    # --- Step 2: Retrieve relevant documents ---
+    try:
+        retrieved = retrieve_for_chat(
+            query_embedding=query_embedding,
+            search_knowledge_flag=request.filters.search_knowledge,
+            search_calls_flag=request.filters.search_calls,
+            categories=request.filters.categories,
+            knowledge_limit=request.filters.knowledge_limit,
+            calls_limit=request.filters.calls_limit,
+        )
+        logger.info(f"CHAT | Retrieved knowledge={len(retrieved['knowledge_docs'])} calls={len(retrieved['call_docs'])}")
+    except Exception as e:
+        logger.error(f"CHAT | Retrieval failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Retrieval failed: {str(e)}")
+
+    # --- Step 3: Build chat context ---
+    history_dicts = [msg.model_dump() for msg in request.conversation_history]
+    chat_ctx = build_chat_context(
+        question=request.question,
+        knowledge_docs=retrieved["knowledge_docs"],
+        call_docs=retrieved["call_docs"],
+        conversation_history=history_dicts,
+    )
+
+    # --- Step 4: LLM answer generation ---
+    try:
+        llm_result = run_chat_reasoning(chat_ctx)
+        logger.info(f"CHAT | LLM done | {llm_result['tokens_used']} tokens")
+    except Exception as e:
+        logger.error(f"CHAT | LLM failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"LLM reasoning failed: {str(e)}")
+
+    # --- Step 5: Build sources list ---
+    sources = []
+    referenced_ids = set(llm_result.get("source_ids", []))
+
+    for doc in retrieved["knowledge_docs"]:
+        sources.append(ChatSource(
+            type="knowledge",
+            doc_id=doc.get("doc_id", ""),
+            category=doc.get("category", ""),
+            title=doc.get("title", ""),
+            similarity=round(doc.get("similarity", 0), 4),
+        ))
+
+    for call in retrieved["call_docs"]:
+        sources.append(ChatSource(
+            type="call",
+            doc_id=call.get("call_id", ""),
+            category="call_analysis",
+            title=f"Risk={call.get('risk_score', '?')} | {call.get('fraud_likelihood', '?')}",
+            similarity=round(call.get("similarity", 0), 4),
+        ))
+
+    # --- Step 6: Return response ---
+    return ChatResponse(
+        answer=llm_result["answer"],
+        sources=sources,
+        metadata=ChatMetadata(
+            knowledge_docs_searched=len(retrieved["knowledge_docs"]),
+            calls_searched=len(retrieved["call_docs"]),
+            model=llm_result["model"],
+            tokens_used=llm_result["tokens_used"],
+        ),
+    )

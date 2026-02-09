@@ -747,4 +747,409 @@
 
   ---
 
+  # 15. Feature — Knowledge Query Chatbot
+
+  ## Purpose
+
+  An interactive Q&A endpoint that lets compliance officers, auditors, and analysts
+  ask natural language questions about fraud patterns, compliance rules, risk
+  heuristics, and past call analyses — and receive grounded, cited answers.
+
+  This turns the RAG knowledge base into a **searchable policy assistant** instead
+  of a black box that only activates during call ingestion.
+
+  ### Use Cases
+
+  1. **Policy lookup** — "What are the indicators of a conditional promise fraud pattern?"
+  2. **Risk interpretation** — "How should a risk score of 72 with weak obligation be assessed?"
+  3. **Compliance guidance** — "What language is prohibited in risk assessment reports?"
+  4. **Call investigation** — "Show me high-risk calls from today with evasive responses"
+  5. **Pattern exploration** — "Which fraud patterns involve audio manipulation?"
+
+  ---
+
+  ## Architecture
+
+  ```
+  User Question
+       │
+       ▼
+  ┌─────────────────────┐
+  │  POST /api/v1/chat  │  (receives question + optional filters)
+  └──────────┬──────────┘
+             │
+             ▼
+  ┌─────────────────────┐
+  │  Embed Question     │  text-embedding-3-small → 1536-dim vector
+  └──────────┬──────────┘
+             │
+       ┌─────┴─────┐
+       ▼           ▼
+  ┌─────────┐ ┌──────────┐
+  │Knowledge│ │Call Store │  (optional: search past call_analyses)
+  │ Search  │ │  Search   │
+  └────┬────┘ └─────┬────┘
+       │            │
+       └─────┬──────┘
+             ▼
+  ┌─────────────────────┐
+  │  Build Chat Context │  retrieved docs + question + conversation history
+  └──────────┬──────────┘
+             │
+             ▼
+  ┌─────────────────────┐
+  │   LLM (GPT-4o)     │  answer with citations
+  └──────────┬──────────┘
+             │
+             ▼
+  ┌─────────────────────┐
+  │  Return Response    │  answer + sources + metadata
+  └─────────────────────┘
+  ```
+
+  ---
+
+  ## Input Contract
+
+  **Endpoint:** `POST /api/v1/chat`
+
+  ```json
+  {
+    "question": "What fraud patterns involve conditional promises with contradictions?",
+    "conversation_history": [
+      {
+        "role": "user",
+        "content": "What are the main fraud patterns?"
+      },
+      {
+        "role": "assistant",
+        "content": "The knowledge base contains six documented fraud patterns..."
+      }
+    ],
+    "filters": {
+      "search_knowledge": true,
+      "search_calls": false,
+      "categories": ["fraud_pattern", "compliance", "risk_heuristic"],
+      "knowledge_limit": 5,
+      "calls_limit": 3
+    }
+  }
+  ```
+
+  | Field                  | Type      | Required | Default            | Description                                           |
+  | ---------------------- | --------- | -------- | ------------------ | ----------------------------------------------------- |
+  | `question`             | string    | YES      | —                  | Natural language question (min 5 chars)                |
+  | `conversation_history` | array     | NO       | `[]`               | Previous messages for multi-turn context               |
+  | `filters.search_knowledge` | bool | NO       | `true`             | Search the knowledge_embeddings table                  |
+  | `filters.search_calls` | bool      | NO       | `false`            | Also search past call_analyses records                 |
+  | `filters.categories`   | string[]  | NO       | all three          | Which knowledge categories to search                   |
+  | `filters.knowledge_limit` | int    | NO       | `5`                | Max knowledge docs to retrieve                         |
+  | `filters.calls_limit`  | int       | NO       | `3`                | Max past calls to retrieve (when search_calls=true)    |
+
+  ---
+
+  ## Output Contract
+
+  ```json
+  {
+    "answer": "The 'Conditional Promise with Contradiction' pattern (fp_001) is triggered when a customer makes a payment promise with high conditionality and then contradicts prior statements. Historical data shows 73% of such calls result in non-payment. Key markers include conditional language ('I will pay if...', 'maybe next week') followed by conflicting statements about financial status.",
+    "sources": [
+      {
+        "type": "knowledge",
+        "doc_id": "fp_001",
+        "category": "fraud_pattern",
+        "title": "Conditional Promise with Contradiction",
+        "similarity": 0.92
+      },
+      {
+        "type": "knowledge",
+        "doc_id": "fp_004",
+        "category": "fraud_pattern",
+        "title": "Evasive Response Pattern",
+        "similarity": 0.78
+      }
+    ],
+    "metadata": {
+      "knowledge_docs_searched": 5,
+      "calls_searched": 0,
+      "model": "gpt-4o-mini",
+      "tokens_used": 824
+    }
+  }
+  ```
+
+  ---
+
+  ## Execution Flow
+
+  ### Chat Step 1 — Receive & Validate Question
+
+  **File:** `app/api/routes.py` → `app/models/schemas.py`
+
+  - Validate `ChatRequest` schema via Pydantic
+  - `question` must be at least 5 characters
+  - `conversation_history` capped at last 10 messages to control token usage
+  - Apply default filters if not provided
+
+  **Schema:**
+
+  ```python
+  class ChatMessage(BaseModel):
+      role: str = Field(..., description="user | assistant")
+      content: str
+
+  class ChatFilters(BaseModel):
+      search_knowledge: bool = True
+      search_calls: bool = False
+      categories: list[str] = ["fraud_pattern", "compliance", "risk_heuristic"]
+      knowledge_limit: int = Field(default=5, ge=1, le=10)
+      calls_limit: int = Field(default=3, ge=1, le=10)
+
+  class ChatRequest(BaseModel):
+      question: str = Field(..., min_length=5)
+      conversation_history: list[ChatMessage] = []
+      filters: ChatFilters = ChatFilters()
+
+  class ChatSource(BaseModel):
+      type: str
+      doc_id: str
+      category: str
+      title: str
+      similarity: float
+
+  class ChatResponse(BaseModel):
+      answer: str
+      sources: list[ChatSource]
+      metadata: dict
+  ```
+
+  ---
+
+  ### Chat Step 2 — Embed Question
+
+  **File:** `app/services/embedding.py` (reuse existing `embed_text`)
+
+  - Embed the user's question using the same `text-embedding-3-small` model
+  - This produces a 1536-dim query vector identical to how `summary_for_rag` is embedded
+  - Reuses the existing embedding service — no new code needed
+
+  ---
+
+  ### Chat Step 3 — Retrieve Relevant Documents
+
+  **File:** `app/services/chat_retrieval.py`
+
+  Two search paths, controlled by `filters`:
+
+  **3A — Knowledge Base Search** (default: ON)
+
+  Search `knowledge_embeddings` across the requested categories.
+  Uses the same `match_knowledge` RPC function from Step 4 of the main pipeline.
+
+  ```sql
+  -- For each category in filters.categories:
+  SELECT doc_id, category, title, content, 1 - (embedding <=> :query_embedding) AS similarity
+  FROM knowledge_embeddings
+  WHERE category = :category
+  ORDER BY embedding <=> :query_embedding
+  LIMIT :knowledge_limit;
+  ```
+
+  **3B — Call History Search (Vector)** (default: OFF)
+
+  When `search_calls=true`, search past `call_analyses` records using **vector
+  similarity** on the `summary_embedding` column — the same embedding produced
+  in Step 3 of the main pipeline, now stored alongside the call record.
+
+  **DB change:** `call_analyses` gets a new `summary_embedding vector(1536)` column.
+  During the main pipeline, after Step 3 embeds `summary_for_rag`, the embedding
+  is stored back into the call record via an UPDATE. This makes every processed
+  call searchable by semantic similarity.
+
+  This requires a new RPC function:
+
+  ```sql
+  CREATE OR REPLACE FUNCTION match_calls(
+      query_embedding vector(1536),
+      match_limit INT DEFAULT 3
+  )
+  RETURNS TABLE (
+      call_id TEXT,
+      call_timestamp TIMESTAMPTZ,
+      summary_for_rag TEXT,
+      risk_score INT,
+      fraud_likelihood TEXT,
+      grounded_assessment TEXT,
+      similarity FLOAT
+  )
+  LANGUAGE plpgsql
+  AS $$
+  BEGIN
+      RETURN QUERY
+      SELECT
+          ca.call_id,
+          ca.call_timestamp,
+          ca.summary_for_rag,
+          (ca.risk_assessment->>'risk_score')::INT,
+          ca.risk_assessment->>'fraud_likelihood',
+          ca.rag_output->>'grounded_assessment',
+          1 - (ca.summary_embedding <=> query_embedding) AS similarity
+      FROM call_analyses ca
+      WHERE ca.rag_output IS NOT NULL
+        AND ca.summary_embedding IS NOT NULL
+      ORDER BY ca.summary_embedding <=> query_embedding
+      LIMIT match_limit;
+  END;
+  $$;
+  ```
+
+  > **How it works:** During the main pipeline Step 3, `summary_for_rag` is
+  > embedded. That same 1536-dim vector is persisted to `call_analyses.summary_embedding`.
+  > The chatbot then embeds the user's question and runs cosine similarity
+  > against all stored call embeddings — true semantic search, not recency.
+
+  ---
+
+  ### Chat Step 4 — Build Chat Context
+
+  **File:** `app/services/chat_context.py`
+
+  Build a structured context for the LLM from:
+  1. Retrieved knowledge documents
+  2. Retrieved call records (if enabled)
+  3. Conversation history (last 10 messages)
+  4. The current question
+
+  **Expected context format:**
+
+  ```
+  === RETRIEVED KNOWLEDGE ===
+  [1] (fraud_pattern, 0.92) Conditional Promise with Contradiction
+      When a customer makes a payment promise with high conditionality...
+
+  [2] (compliance, 0.85) Verbal Commitment Assessment Guidelines
+      Verbal commitments with high conditionality should not be treated...
+
+  === RECENT CALL ANALYSES ===
+  [1] call_2026_02_09_a1b2c3 | risk=78 | high_risk
+      Summary: Customer made a conditional repayment promise...
+
+  === CONVERSATION HISTORY ===
+  User: What are the main fraud patterns?
+  Assistant: The knowledge base contains six documented fraud patterns...
+
+  === CURRENT QUESTION ===
+  What fraud patterns involve conditional promises with contradictions?
+  ```
+
+  ---
+
+  ### Chat Step 5 — LLM Answer Generation
+
+  **File:** `app/services/chat_reasoning.py`
+
+  - Send context to GPT-4o-mini
+  - LLM generates a grounded answer citing specific documents
+  - Uses a chatbot-specific system prompt (different from the risk grounding prompt)
+
+  **System Prompt:**
+
+  ```
+  You are a financial compliance knowledge assistant. You answer questions
+  about fraud patterns, compliance rules, risk heuristics, and call analysis
+  data by grounding your answers in retrieved knowledge documents.
+
+  RULES:
+  - Answer ONLY based on the provided retrieved knowledge and call data
+  - If the retrieved documents don't contain the answer, say "I don't have
+    enough information in the knowledge base to answer that."
+  - Cite specific document titles and IDs when referencing knowledge
+  - Use clear, professional language appropriate for compliance teams
+  - Do NOT invent patterns or rules not present in the knowledge base
+  - Do NOT use accusatory language ("fraudster", "liar", "criminal")
+  - When discussing call records, reference them by call_id
+  - Keep answers concise but thorough — aim for 2-4 paragraphs max
+  - If the question is ambiguous, ask for clarification
+  ```
+
+  ---
+
+  ### Chat Step 6 — Return Response
+
+  **File:** `app/api/routes.py`
+
+  Assemble the response with answer, sources, and metadata.
+
+  ---
+
+  ## API Endpoint (Updated Table)
+
+  | Method | Path                          | Description                              |
+  | ------ | ----------------------------- | ---------------------------------------- |
+  | POST   | `/api/v1/analyze-call`        | Main pipeline — ground + assess          |
+  | GET    | `/api/v1/call/{call_id}`      | Get single call analysis                 |
+  | POST   | `/api/v1/knowledge/seed`      | Seed knowledge base (one-time setup)     |
+  | GET    | `/api/v1/knowledge/status`    | Check knowledge base document count      |
+  | **POST** | **`/api/v1/chat`**          | **Knowledge query chatbot**              |
+  | GET    | `/health`                     | Health check                             |
+
+  ---
+
+  ## Updated Folder Structure (New Files)
+
+  ```
+  app/
+  ├── services/
+  │   ├── ...existing...
+  │   ├── chat_retrieval.py       # Chat Step 3: search knowledge + calls
+  │   ├── chat_context.py         # Chat Step 4: build chat context
+  │   └── chat_reasoning.py       # Chat Step 5: LLM answer generation
+  │
+  └── models/
+      └── schemas.py              # + ChatRequest, ChatResponse, ChatMessage, etc.
+  ```
+
+  ---
+
+  ## Build Order (Chat Feature)
+
+  | Phase | Task                                               | Files                                 |
+  | ----- | -------------------------------------------------- | ------------------------------------- |
+  | 13    | Chat Pydantic schemas                              | `app/models/schemas.py`               |
+  | 14    | Chat retrieval service (knowledge + calls search)  | `app/services/chat_retrieval.py`      |
+  | 15    | Chat context builder                               | `app/services/chat_context.py`        |
+  | 16    | Chat LLM reasoning                                 | `app/services/chat_reasoning.py`      |
+  | 17    | Chat route endpoint wiring                         | `app/api/routes.py`                   |
+  | 18    | SQL: `summary_embedding` column + `match_calls` RPC | `sql/init.sql`                        |
+  | 19    | Testing + debugging                                | Manual / Postman                      |
+
+  ---
+
+  ## Chat Error Handling
+
+  | Error Type                | Action                                        |
+  | ------------------------- | --------------------------------------------- |
+  | Empty or short question   | Return 422 with validation error              |
+  | No knowledge matches      | LLM answers "I don't have enough info..."     |
+  | LLM fails                 | Retry once, return fallback message            |
+  | Knowledge base empty      | Return 503 (service not ready)                |
+  | Conversation too long     | Truncate to last 10 messages                  |
+
+  ---
+
+  ## Chat Testing Checklist
+
+  - [ ] POST valid question → 200 with grounded answer
+  - [ ] Answer cites specific document titles/IDs
+  - [ ] Sources array contains retrieved documents with similarity scores
+  - [ ] Metadata shows token count and model used
+  - [ ] Conversation history maintains multi-turn context
+  - [ ] `search_calls=true` returns relevant past call records
+  - [ ] Category filter restricts search to specified categories
+  - [ ] Empty knowledge base → 503
+  - [ ] Short question (<5 chars) → 422
+  - [ ] "Unknown topic" question → LLM says "I don't have enough info"
+
+  ---
+
   # End of Execution Plan
