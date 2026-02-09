@@ -31,7 +31,7 @@ def get_supabase_client() -> Client:
             "Get these from your Supabase project → Settings → API."
         )
 
-    logger.info(f"   Connecting to Supabase: {url[:40]}...")
+    logger.info("Connecting to Supabase...")
     _client = create_client(url, key)
-    logger.info("   ✓ Supabase client connected")
+    logger.info("Supabase connected")
     return _client

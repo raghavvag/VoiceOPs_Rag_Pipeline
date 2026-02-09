@@ -44,14 +44,12 @@ def insert_call_record(
         # rag_output intentionally omitted — NULL until Step 7
     }
 
-    logger.info(f"   DB INSERT → call_analyses (call_id={call_id})")
+    logger.info(f"DB INSERT call_analyses ({call_id})")
     result = client.table("call_analyses").insert(row).execute()
 
-    # Supabase Python client v2 returns data in result.data
     if not result.data:
         raise RuntimeError(f"Supabase insert returned no data for call_id={call_id}")
 
-    logger.info(f"   ✓ Insert successful")
     return {
         "inserted": True,
         "call_id": call_id,
@@ -126,7 +124,7 @@ def search_knowledge(
     """
     client = get_supabase_client()
 
-    logger.info(f"   DB RPC → match_knowledge (category={category}, limit={limit})")
+    logger.info(f"DB RPC match_knowledge (category={category}, limit={limit})")
     result = client.rpc(
         "match_knowledge",
         {
@@ -137,10 +135,8 @@ def search_knowledge(
     ).execute()
 
     if not result.data:
-        logger.info(f"   ⚠ No matches found for category={category}")
         return []
 
-    logger.info(f"   ✓ {len(result.data)} matches found")
     return result.data
 
 

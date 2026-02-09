@@ -31,7 +31,7 @@ def store_call_record(
     Raises:
         RuntimeError: If Supabase insert fails
     """
-    logger.info(f"   Inserting call_id={call_id} into call_analyses...")
+    logger.info(f"Inserting {call_id} into call_analyses")
 
     result = insert_call_record(
         call_id=call_id,
@@ -44,5 +44,4 @@ def store_call_record(
         summary_for_rag=payload.summary_for_rag,
     )
 
-    logger.info(f"   Insert complete for call_id={call_id}")
     return result

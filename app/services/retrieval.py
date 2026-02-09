@@ -38,45 +38,15 @@ def retrieve_knowledge_chunks(query_embedding: list[float]) -> dict:
     compliance_limit = int(os.getenv("COMPLIANCE_RETRIEVAL_LIMIT", "2"))
     heuristic_limit = int(os.getenv("RISK_HEURISTIC_RETRIEVAL_LIMIT", "2"))
 
-    logger.info(f"   Retrieval limits → fraud={fraud_limit}, compliance={compliance_limit}, heuristic={heuristic_limit}")
-
     try:
-        # 4A — Fraud Pattern Retrieval
-        logger.info("   4A │ Searching fraud_pattern...")
-        fraud_patterns = search_knowledge(
-            query_embedding=query_embedding,
-            category="fraud_pattern",
-            limit=fraud_limit,
-        )
-        for doc in fraud_patterns:
-            logger.info(f"      → [{doc['doc_id']}] {doc['title']} (sim={doc['similarity']:.4f})")
-
-        # 4B — Compliance Guidance Retrieval
-        logger.info("   4B │ Searching compliance...")
-        compliance_docs = search_knowledge(
-            query_embedding=query_embedding,
-            category="compliance",
-            limit=compliance_limit,
-        )
-        for doc in compliance_docs:
-            logger.info(f"      → [{doc['doc_id']}] {doc['title']} (sim={doc['similarity']:.4f})")
-
-        # 4C — Risk Heuristic Retrieval
-        logger.info("   4C │ Searching risk_heuristic...")
-        risk_heuristics = search_knowledge(
-            query_embedding=query_embedding,
-            category="risk_heuristic",
-            limit=heuristic_limit,
-        )
-        for doc in risk_heuristics:
-            logger.info(f"      → [{doc['doc_id']}] {doc['title']} (sim={doc['similarity']:.4f})")
-
+        fraud_patterns = search_knowledge(query_embedding, "fraud_pattern", fraud_limit)
+        compliance_docs = search_knowledge(query_embedding, "compliance", compliance_limit)
+        risk_heuristics = search_knowledge(query_embedding, "risk_heuristic", heuristic_limit)
     except Exception as e:
-        logger.error(f"   ✗ Knowledge retrieval failed: {str(e)}")
+        logger.error(f"Knowledge retrieval failed: {str(e)}")
         raise RuntimeError(f"Knowledge retrieval failed: {str(e)}")
 
-    total = len(fraud_patterns) + len(compliance_docs) + len(risk_heuristics)
-    logger.info(f"   ✓ Total knowledge chunks retrieved: {total}")
+    logger.info(f"Retrieved: fraud={len(fraud_patterns)} compliance={len(compliance_docs)} heuristic={len(risk_heuristics)}")
 
     return {
         "fraud_patterns": fraud_patterns,

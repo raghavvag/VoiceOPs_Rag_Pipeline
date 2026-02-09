@@ -13,6 +13,7 @@ from app.utils.id_generator import generate_call_id, generate_call_timestamp
 from app.services.ingestion import store_call_record
 from app.services.embedding import embed_text
 from app.services.retrieval import retrieve_knowledge_chunks
+from app.services.context_builder import build_grounding_context
 from app.services.seeding import seed_knowledge_base
 from app.db.queries import get_call_by_id, get_knowledge_count
 
@@ -39,72 +40,68 @@ async def analyze_call(payload: CallRiskInput):
     call_id = generate_call_id()
     call_timestamp = generate_call_timestamp()
 
-    logger.info("═" * 60)
-    logger.info("🔵 STEP 1 │ Payload validated ✓")
-    logger.info(f"   call_id      : {call_id}")
-    logger.info(f"   timestamp    : {call_timestamp.isoformat()}")
-    logger.info(f"   risk_score   : {payload.risk_assessment.risk_score}")
-    logger.info(f"   fraud_likely : {payload.risk_assessment.fraud_likelihood}")
-    logger.info(f"   summary      : {payload.summary_for_rag[:80]}...")
+    logger.info(f"[{call_id}] STEP 1 | Validated | risk={payload.risk_assessment.risk_score} fraud={payload.risk_assessment.fraud_likelihood}")
 
     # --- Step 2: Store Call Record ---
-    logger.info("─" * 60)
-    logger.info("🟢 STEP 2 │ Storing call record in Supabase...")
     try:
         ingestion_result = store_call_record(
             call_id=call_id,
             call_timestamp=call_timestamp,
             payload=payload,
         )
-        logger.info(f"   ✓ Stored in table: {ingestion_result['table']}")
+        logger.info(f"[{call_id}] STEP 2 | Stored in {ingestion_result['table']}")
     except Exception as e:
-        logger.error(f"   ✗ Failed to store: {str(e)}")
+        logger.error(f"[{call_id}] STEP 2 | FAILED: {str(e)}")
         raise HTTPException(
             status_code=500,
             detail=f"Failed to store call record: {str(e)}",
         )
 
     # --- Step 3: Embed summary_for_rag ---
-    logger.info("─" * 60)
-    logger.info("🟡 STEP 3 │ Embedding summary_for_rag via OpenAI...")
     try:
         query_embedding = embed_text(payload.summary_for_rag)
-        logger.info(f"   ✓ Embedding generated — dim={len(query_embedding)}")
+        logger.info(f"[{call_id}] STEP 3 | Embedded summary | dim={len(query_embedding)}")
     except Exception as e:
-        logger.error(f"   ✗ Embedding failed: {str(e)}")
+        logger.error(f"[{call_id}] STEP 3 | FAILED: {str(e)}")
         raise HTTPException(
             status_code=500,
             detail=f"Failed to embed summary: {str(e)}",
         )
 
     # --- Step 4: Retrieve Knowledge Chunks ---
-    logger.info("─" * 60)
-    logger.info("🟠 STEP 4 │ Retrieving knowledge chunks...")
     try:
         knowledge_chunks = retrieve_knowledge_chunks(query_embedding)
-        logger.info(f"   ✓ fraud_patterns  : {len(knowledge_chunks['fraud_patterns'])} docs")
-        logger.info(f"   ✓ compliance_docs : {len(knowledge_chunks['compliance_docs'])} docs")
-        logger.info(f"   ✓ risk_heuristics : {len(knowledge_chunks['risk_heuristics'])} docs")
+        logger.info(f"[{call_id}] STEP 4 | Retrieved fraud={len(knowledge_chunks['fraud_patterns'])} compliance={len(knowledge_chunks['compliance_docs'])} heuristic={len(knowledge_chunks['risk_heuristics'])}")
     except Exception as e:
-        logger.error(f"   ✗ Knowledge retrieval failed: {str(e)}")
+        logger.error(f"[{call_id}] STEP 4 | FAILED: {str(e)}")
         raise HTTPException(
             status_code=500,
             detail=f"Failed to retrieve knowledge: {str(e)}",
         )
 
-    # TODO: Step 5 — Build grounding context (context_builder.py)
+    # --- Step 5: Build Grounding Context ---
+    try:
+        grounding_context = build_grounding_context(
+            payload=payload,
+            knowledge_chunks=knowledge_chunks,
+        )
+        logger.info(f"[{call_id}] STEP 5 | Context built | {len(grounding_context)} chars")
+    except Exception as e:
+        logger.error(f"[{call_id}] STEP 5 | FAILED: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to build grounding context: {str(e)}",
+        )
+
     # TODO: Step 6 — LLM grounded reasoning (reasoning.py)
     # TODO: Step 7 — Store RAG output (updater.py)
 
     # --- Step 8: Return Response ---
-    logger.info("─" * 60)
-    logger.info("✅ PIPELINE │ Steps 1-4 complete — returning response")
-    logger.info("═" * 60)
-    # For now, return confirmation that Steps 1-4 are complete.
+    logger.info(f"[{call_id}] DONE | Steps 1-5 complete")
     return {
         "call_id": call_id,
         "call_timestamp": call_timestamp.isoformat(),
-        "status": "retrieved",
+        "status": "context_built",
         "input_risk_assessment": payload.risk_assessment.model_dump(),
         "ingestion": ingestion_result,
         "embedding_dim": len(query_embedding),
@@ -112,9 +109,9 @@ async def analyze_call(payload: CallRiskInput):
             "fraud_patterns_count": len(knowledge_chunks["fraud_patterns"]),
             "compliance_docs_count": len(knowledge_chunks["compliance_docs"]),
             "risk_heuristics_count": len(knowledge_chunks["risk_heuristics"]),
-            "details": knowledge_chunks,
         },
-        "message": "Steps 1-4 complete. Payload validated, stored, embedded, and knowledge retrieved. Pipeline steps 5-8 not yet wired.",
+        "grounding_context": grounding_context,
+        "message": "Steps 1-5 complete. Pipeline steps 6-8 not yet wired.",
     }
 
 
@@ -125,12 +122,12 @@ async def seed_knowledge():
     Embeds each document and upserts into knowledge_embeddings table.
     Run ONCE before using the pipeline.
     """
-    logger.info("🌱 Knowledge seeding requested...")
+    logger.info("Seeding knowledge base...")
     try:
         result = seed_knowledge_base()
-        logger.info(f"   ✓ Seeded {result['documents_processed']} docs → {result['by_category']}")
+        logger.info(f"Seeded {result['documents_processed']} docs | {result['by_category']}")
     except Exception as e:
-        logger.error(f"   ✗ Seeding failed: {str(e)}")
+        logger.error(f"Seeding failed: {str(e)}")
         raise HTTPException(
             status_code=500,
             detail=f"Knowledge seeding failed: {str(e)}",
@@ -157,22 +154,21 @@ async def get_call(call_id: str):
     Get a single call analysis by call_id.
     Returns the full call record including rag_output (if available).
     """
-    logger.info(f"📋 Fetching call record: {call_id}")
+    logger.info(f"Fetching call: {call_id}")
     try:
         record = get_call_by_id(call_id)
     except Exception as e:
-        logger.error(f"   ✗ DB error: {str(e)}")
+        logger.error(f"DB error fetching {call_id}: {str(e)}")
         raise HTTPException(
             status_code=500,
             detail=f"Database error: {str(e)}",
         )
 
     if record is None:
-        logger.warning(f"   ✗ Call not found: {call_id}")
+        logger.warning(f"Call not found: {call_id}")
         raise HTTPException(
             status_code=404,
             detail=f"Call not found: {call_id}",
         )
 
-    logger.info(f"   ✓ Found call: {call_id}")
     return record

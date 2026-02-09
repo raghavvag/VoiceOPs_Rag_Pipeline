@@ -47,8 +47,7 @@ def embed_text(text: str) -> list[float]:
     model = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
     client = _get_openai_client()
 
-    logger.info(f"   Calling OpenAI embeddings (model={model})...")
-    logger.info(f"   Text: \"{text[:60]}...\"")
+    logger.info(f"Embedding text ({len(text)} chars) via {model}")
 
     try:
         response = client.embeddings.create(
@@ -56,8 +55,7 @@ def embed_text(text: str) -> list[float]:
             model=model,
         )
         embedding = response.data[0].embedding
-        logger.info(f"   ✓ Embedding received — {len(embedding)} dimensions")
         return embedding
     except Exception as e:
-        logger.error(f"   ✗ OpenAI API error: {str(e)}")
+        logger.error(f"OpenAI embedding failed: {str(e)}")
         raise RuntimeError(f"OpenAI embedding failed: {str(e)}")

@@ -42,9 +42,7 @@ def seed_knowledge_base() -> dict:
     if not knowledge_dir.exists():
         raise RuntimeError(f"Knowledge directory not found: {knowledge_dir}")
 
-    logger.info("═" * 60)
-    logger.info("🌱 SEEDING │ Starting knowledge base seeding...")
-    logger.info(f"   Directory: {knowledge_dir}")
+    logger.info(f"Seeding from {knowledge_dir}")
 
     documents_processed = 0
     by_category = {}
@@ -54,15 +52,14 @@ def seed_knowledge_base() -> dict:
         filepath = knowledge_dir / filename
 
         if not filepath.exists():
-            logger.warning(f"   ✗ File not found: {filename}")
+            logger.warning(f"File not found: {filename}")
             errors.append(f"File not found: {filename}")
             continue
 
         with open(filepath, "r", encoding="utf-8") as f:
             docs = json.load(f)
 
-        logger.info(f"─" * 60)
-        logger.info(f"   📄 Processing: {filename} ({len(docs)} docs, category={expected_category})")
+        logger.info(f"Processing {filename} ({len(docs)} docs)")
 
         category_count = 0
 
@@ -73,13 +70,13 @@ def seed_knowledge_base() -> dict:
             content = doc["content"]
             metadata = doc.get("metadata", {})
 
-            logger.info(f"      [{doc_id}] {title}")
+            logger.info(f"  [{doc_id}] {title}")
 
             # Embed the content (this is what gets searched against)
             try:
                 embedding = embed_text(content)
             except Exception as e:
-                logger.error(f"      ✗ Embedding failed for {doc_id}: {str(e)}")
+                logger.error(f"Embedding failed for {doc_id}: {str(e)}")
                 errors.append(f"Embedding failed for {doc_id}: {str(e)}")
                 continue
 
@@ -94,21 +91,17 @@ def seed_knowledge_base() -> dict:
                     metadata=metadata,
                 )
             except Exception as e:
-                logger.error(f"      ✗ Upsert failed for {doc_id}: {str(e)}")
+                logger.error(f"Upsert failed for {doc_id}: {str(e)}")
                 errors.append(f"Upsert failed for {doc_id}: {str(e)}")
                 continue
 
-            logger.info(f"      ✓ Upserted successfully")
             category_count += 1
             documents_processed += 1
 
-        logger.info(f"   ✓ {expected_category}: {category_count} docs processed")
         by_category[expected_category] = category_count
 
     total_in_db = get_knowledge_count()
-    logger.info("═" * 60)
-    logger.info(f"✅ SEEDING COMPLETE │ {documents_processed} docs processed │ {total_in_db} in DB")
-    logger.info("═" * 60)
+    logger.info(f"Seeding complete | {documents_processed} docs | {total_in_db} in DB")
 
     result = {
         "seeded": True,
