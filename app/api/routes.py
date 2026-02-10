@@ -5,6 +5,8 @@ Steps 1-8: Full pipeline from validation to grounded assessment.
 
 import logging
 import math
+import json as _json
+import re
 from fastapi import APIRouter, HTTPException, Query
 from app.models.schemas import (
     CallRiskInput, CallAnalysisResponse,
@@ -22,10 +24,15 @@ from app.services.seeding import seed_knowledge_base
 from app.services.chat_retrieval import retrieve_for_chat, extract_call_ids, lookup_calls_by_id
 from app.services.chat_context import build_chat_context
 from app.services.chat_reasoning import run_chat_reasoning
+from app.services.backboard_service import (
+    create_thread_for_call, log_to_thread, get_thread,
+    get_thread_messages, get_assistant_threads, query_memory, query_thread,
+)
 from app.db.queries import (
     get_call_by_id, get_knowledge_count, update_call_embedding,
     get_dashboard_stats, get_recent_activity, get_top_patterns,
     get_active_cases, update_call_status, get_calls_paginated,
+    update_backboard_thread_id, get_recent_calls,
 )
 
 def status_from_risk_score(score: int) -> str:
@@ -130,6 +137,30 @@ async def analyze_call(payload: CallRiskInput):
             detail=f"Failed to build grounding context: {str(e)}",
         )
 
+    # --- Step 5b: Backboard — create thread & log context (non-blocking) ---
+    backboard_thread_id = None
+    try:
+        backboard_thread_id = create_thread_for_call(call_id)
+        if backboard_thread_id:
+            # Log call signals
+            signals_summary = _json.dumps(payload.model_dump(), default=str)
+            log_to_thread(
+                backboard_thread_id,
+                f"[CALL SIGNALS]\n{signals_summary}",
+                label=f"{call_id}/signals",
+            )
+            # Log grounding context
+            log_to_thread(
+                backboard_thread_id,
+                f"[GROUNDING CONTEXT]\n{grounding_context}",
+                label=f"{call_id}/context",
+            )
+            # Persist thread_id
+            update_backboard_thread_id(call_id, backboard_thread_id)
+            logger.info(f"[{call_id}] STEP 5b | Backboard thread created & logged")
+    except Exception as e:
+        logger.warning(f"[{call_id}] STEP 5b | Backboard failed (non-fatal): {e}")
+
     # --- Step 6: LLM Grounded Reasoning ---
     try:
         rag_output = run_grounded_reasoning(grounding_context)
@@ -140,6 +171,18 @@ async def analyze_call(payload: CallRiskInput):
             status_code=500,
             detail=f"LLM reasoning failed: {str(e)}",
         )
+
+    # --- Step 6b: Backboard — log LLM output (non-blocking) ---
+    try:
+        if backboard_thread_id:
+            log_to_thread(
+                backboard_thread_id,
+                f"[LLM REASONING OUTPUT]\n{_json.dumps(rag_output, default=str)}",
+                label=f"{call_id}/llm_output",
+            )
+            logger.info(f"[{call_id}] STEP 6b | Backboard LLM output logged")
+    except Exception as e:
+        logger.warning(f"[{call_id}] STEP 6b | Backboard failed (non-fatal): {e}")
 
     # --- Step 7: Store RAG Output ---
     try:
@@ -167,6 +210,7 @@ async def analyze_call(payload: CallRiskInput):
         "call_timestamp": call_timestamp.isoformat(),
         "input_risk_assessment": payload.risk_assessment.model_dump(),
         "rag_output": rag_output,
+        "backboard_thread_id": backboard_thread_id,
     }
 
 
@@ -254,6 +298,32 @@ async def chat(request: ChatRequest):
 
     logger.info(f"CHAT | Question: {request.question[:80]}...")
 
+    # --- Detect temporal query (e.g., "last 5 calls", "past 10 days") ---
+    temporal_calls = []
+    backboard_memory_answer = None
+    temporal_match = re.search(
+        r'(?:last|past|recent)\s+(\d+)\s*(?:calls?|records?|cases?|days?|analyses?)',
+        request.question,
+        re.IGNORECASE,
+    )
+    if temporal_match:
+        num = int(temporal_match.group(1))
+        # Determine if it's days-based or count-based
+        is_days = bool(re.search(r'days?', temporal_match.group(0), re.IGNORECASE))
+        if is_days:
+            temporal_calls = get_recent_calls(days=num, limit=10)
+        else:
+            temporal_calls = get_recent_calls(days=90, limit=num)
+        logger.info(f"CHAT | Temporal query detected: fetched {len(temporal_calls)} calls")
+
+        # Query Backboard memory for cross-call insights
+        try:
+            backboard_memory_answer = query_memory(request.question)
+            if backboard_memory_answer:
+                logger.info("CHAT | Backboard memory enrichment retrieved")
+        except Exception as e:
+            logger.warning(f"CHAT | Backboard memory query failed (non-fatal): {e}")
+
     # --- Detect call IDs in question for direct lookup ---
     mentioned_call_ids = extract_call_ids(request.question)
     direct_lookups = []
@@ -292,12 +362,33 @@ async def chat(request: ChatRequest):
 
     # --- Step 3: Build chat context ---
     history_dicts = [msg.model_dump() for msg in request.conversation_history]
+
+    # Merge temporal calls into call_docs if any
+    if temporal_calls:
+        existing_ids = {c.get("call_id") for c in retrieved["call_docs"]}
+        for tc in temporal_calls:
+            if tc["call_id"] not in existing_ids:
+                ra = tc.get("risk_assessment") or {}
+                ro = tc.get("rag_output") or {}
+                retrieved["call_docs"].append({
+                    "call_id": tc["call_id"],
+                    "risk_score": ra.get("risk_score", 0),
+                    "fraud_likelihood": ra.get("fraud_likelihood", "unknown"),
+                    "grounded_assessment": ro.get("grounded_assessment", "pending"),
+                    "summary_for_rag": tc.get("summary_for_rag", ""),
+                    "similarity": 1.0,  # direct temporal fetch
+                })
+
     chat_ctx = build_chat_context(
         question=request.question,
         knowledge_docs=retrieved["knowledge_docs"],
         call_docs=retrieved["call_docs"],
         conversation_history=history_dicts,
     )
+
+    # Append Backboard memory insight if available
+    if backboard_memory_answer:
+        chat_ctx += f"\n\n=== BACKBOARD AI MEMORY INSIGHT ===\n{backboard_memory_answer}\n"
 
     # --- Step 4: LLM answer generation ---
     try:
@@ -497,4 +588,110 @@ async def list_calls(
             "total": total,
             "total_pages": total_pages,
         },
+    }
+
+
+# ============================================================
+# Backboard AI — Reasoning Audit & Memory Endpoints
+# ============================================================
+
+@router.get("/backboard/threads/all")
+async def list_all_backboard_threads():
+    """
+    List all Backboard reasoning threads (for admin/debug view).
+    Each thread corresponds to one analyzed call.
+    """
+    threads = get_assistant_threads()
+    return {
+        "total_threads": len(threads),
+        "threads": threads,
+    }
+
+
+@router.post("/backboard/memory/query")
+async def query_backboard_memory(body: dict):
+    """
+    Query Backboard's cross-call memory.
+    Backboard's memory layer learns patterns across ALL analyzed calls.
+
+    Body: {"question": "What are the most common fraud patterns in the last week?"}
+    """
+    question = body.get("question")
+    if not question:
+        raise HTTPException(status_code=422, detail="'question' field is required")
+
+    answer = query_memory(question)
+    if answer is None:
+        raise HTTPException(status_code=502, detail="Backboard memory query failed")
+
+    return {
+        "question": question,
+        "answer": answer,
+        "source": "backboard_memory",
+    }
+
+
+@router.get("/backboard/{call_id}")
+async def get_backboard_audit_trail(call_id: str):
+    """
+    Retrieve the full Backboard reasoning audit trail for a call.
+    Shows the complete chain: call signals → grounding context → LLM output.
+    """
+    record = get_call_by_id(call_id)
+    if not record:
+        raise HTTPException(status_code=404, detail=f"Call not found: {call_id}")
+
+    thread_id = record.get("backboard_thread_id")
+    if not thread_id:
+        return {
+            "call_id": call_id,
+            "backboard_thread_id": None,
+            "backboard": None,
+            "message": "No Backboard audit trail for this call (processed before Backboard integration)",
+        }
+
+    thread_data = get_thread(thread_id)
+    messages = get_thread_messages(thread_id)
+
+    return {
+        "call_id": call_id,
+        "backboard_thread_id": thread_id,
+        "thread": thread_data,
+        "messages": messages,
+        "audit_trail_available": True,
+    }
+
+
+@router.post("/backboard/{call_id}/query")
+async def query_backboard_thread(call_id: str, body: dict):
+    """
+    Ask a question about a specific call's reasoning via Backboard.
+    The LLM has full context of the call signals, grounding context, and reasoning output.
+
+    Body: {"question": "Why was this call flagged as high risk?"}
+    """
+    question = body.get("question")
+    if not question:
+        raise HTTPException(status_code=422, detail="'question' field is required")
+
+    record = get_call_by_id(call_id)
+    if not record:
+        raise HTTPException(status_code=404, detail=f"Call not found: {call_id}")
+
+    thread_id = record.get("backboard_thread_id")
+    if not thread_id:
+        raise HTTPException(
+            status_code=404,
+            detail="No Backboard thread for this call. Cannot query reasoning.",
+        )
+
+    answer = query_thread(thread_id, question)
+    if answer is None:
+        raise HTTPException(status_code=502, detail="Backboard query failed")
+
+    return {
+        "call_id": call_id,
+        "question": question,
+        "answer": answer,
+        "backboard_thread_id": thread_id,
     }

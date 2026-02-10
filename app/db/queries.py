@@ -323,6 +323,35 @@ def get_active_cases(limit: int = 3) -> tuple[list[dict], int]:
     return cases[:limit], total_active
 
 
+def update_backboard_thread_id(call_id: str, thread_id: str) -> None:
+    """Store the Backboard thread_id for a call."""
+    client = get_supabase_client()
+    logger.info(f"DB UPDATE backboard_thread_id ({call_id} → {thread_id[:12]}...)")
+    client.table("call_analyses").update(
+        {"backboard_thread_id": thread_id}
+    ).eq("call_id", call_id).execute()
+
+
+def get_recent_calls(days: int = 10, limit: int = 5) -> list[dict]:
+    """
+    Fetch the most recent N calls within the last `days` days.
+    Used for temporal chatbot queries like "summarize last 5 records".
+    """
+    client = get_supabase_client()
+    from datetime import datetime, timedelta, timezone
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    logger.info(f"DB SELECT recent_calls (days={days}, limit={limit})")
+    result = (
+        client.table("call_analyses")
+        .select("call_id, call_timestamp, status, summary_for_rag, risk_assessment, rag_output, backboard_thread_id")
+        .gte("call_timestamp", cutoff)
+        .order("call_timestamp", desc=True)
+        .limit(limit)
+        .execute()
+    )
+    return result.data if result.data else []
+
+
 def update_call_status(call_id: str, status: str) -> dict | None:
     """Update the status column for a call. Returns updated row or None."""
     client = get_supabase_client()
