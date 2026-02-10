@@ -63,6 +63,12 @@ class RiskAssessment(BaseModel):
     confidence: float = Field(..., ge=0.0, le=1.0)
 
 
+class ConversationTurn(BaseModel):
+    """A single speaker turn in the call transcript."""
+    speaker: str = Field(..., description="AGENT | CUSTOMER")
+    text: str
+
+
 class CallRiskInput(BaseModel):
     """Main input schema — the full payload from NLP service."""
     call_context: CallContext
@@ -71,6 +77,7 @@ class CallRiskInput(BaseModel):
     risk_signals: RiskSignals
     risk_assessment: RiskAssessment
     summary_for_rag: str = Field(..., min_length=10)
+    conversation: list[ConversationTurn] = Field(default_factory=list, description="Call transcript as speaker turns")
 
 
 # ============================================================

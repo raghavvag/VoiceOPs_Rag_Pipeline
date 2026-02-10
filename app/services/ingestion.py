@@ -42,6 +42,8 @@ def store_call_record(
         risk_signals=payload.risk_signals.model_dump(),
         risk_assessment=payload.risk_assessment.model_dump(),
         summary_for_rag=payload.summary_for_rag,
+        conversation=[turn.model_dump() for turn in payload.conversation],
+        call_language=payload.call_context.call_language,
     )
 
     return result

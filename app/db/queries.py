@@ -22,6 +22,8 @@ def insert_call_record(
     risk_signals: dict,
     risk_assessment: dict,
     summary_for_rag: str,
+    conversation: list[dict] | None = None,
+    call_language: str | None = None,
 ) -> dict:
     """
     Insert a new call record into call_analyses.
@@ -41,6 +43,8 @@ def insert_call_record(
         "risk_signals": risk_signals,
         "risk_assessment": risk_assessment,
         "summary_for_rag": summary_for_rag,
+        "conversation": conversation or [],
+        "call_language": call_language or "unknown",
         # rag_output intentionally omitted — NULL until Step 7
     }
 
