@@ -421,3 +421,151 @@ def get_calls_paginated(
         )
 
     return calls, total
+
+
+# ============================================================
+# call_documents table operations
+# ============================================================
+
+def insert_call_document(
+    doc_id: str,
+    call_id: str,
+    document_data: dict,
+    embedding: list[float] | None = None,
+) -> dict:
+    """
+    Insert or upsert an extracted call document into call_documents table.
+
+    Args:
+        doc_id:         Unique document ID (e.g. "cdoc_call_2026_02_11_a1b2c3")
+        call_id:        The parent call_id from call_analyses
+        document_data:  Dict with all extracted fields
+        embedding:      Optional 1536-dim vector for semantic search
+
+    Returns: {"upserted": True, "doc_id": "...", "call_id": "..."}
+    """
+    client = get_supabase_client()
+
+    row = {
+        "doc_id": doc_id,
+        "call_id": call_id,
+        "financial_data": document_data.get("financial_data", {}),
+        "entities": document_data.get("entities", {}),
+        "commitments": document_data.get("commitments", []),
+        "call_summary": document_data.get("call_summary", "No summary."),
+        "call_purpose": document_data.get("call_purpose"),
+        "call_outcome": document_data.get("call_outcome"),
+        "key_discussion_points": document_data.get("key_discussion_points", []),
+        "compliance_notes": document_data.get("compliance_notes", []),
+        "risk_flags": document_data.get("risk_flags", []),
+        "action_items": document_data.get("action_items", []),
+        "call_timeline": document_data.get("call_timeline", []),
+        "extraction_model": document_data.get("extraction_model", "gpt-4o-mini"),
+        "extraction_tokens": document_data.get("extraction_tokens", 0),
+        "extraction_version": document_data.get("extraction_version", "v1"),
+    }
+
+    if embedding:
+        row["doc_embedding"] = embedding
+
+    logger.info(f"DB UPSERT call_documents ({doc_id})")
+    result = client.table("call_documents").upsert(row).execute()
+
+    if not result.data:
+        raise RuntimeError(f"Supabase upsert failed for doc_id={doc_id}")
+
+    return {
+        "upserted": True,
+        "doc_id": doc_id,
+        "call_id": call_id,
+        "table": "call_documents",
+    }
+
+
+def get_call_document(call_id: str) -> dict | None:
+    """
+    Fetch the extracted document for a specific call.
+    Returns the full row or None if not found.
+    """
+    client = get_supabase_client()
+
+    result = (
+        client.table("call_documents")
+        .select("*")
+        .eq("call_id", call_id)
+        .execute()
+    )
+
+    if result.data and len(result.data) > 0:
+        return result.data[0]
+    return None
+
+
+def search_call_documents(
+    query_embedding: list[float],
+    limit: int = 5,
+) -> list[dict]:
+    """
+    Semantic search across all call documents using match_call_documents RPC.
+    """
+    client = get_supabase_client()
+    logger.info(f"DB RPC match_call_documents (limit={limit})")
+    result = client.rpc(
+        "match_call_documents",
+        {
+            "query_embedding": query_embedding,
+            "match_limit": limit,
+        },
+    ).execute()
+    return result.data if result.data else []
+
+
+def get_call_documents_paginated(
+    page: int = 1,
+    limit: int = 10,
+    purpose_filter: str | None = None,
+    outcome_filter: str | None = None,
+) -> tuple[list[dict], int]:
+    """
+    Paginated listing of call documents with optional filters.
+    Returns (docs_list, total_count).
+    """
+    client = get_supabase_client()
+    offset = (page - 1) * limit
+    logger.info(f"DB SELECT call_documents (page={page} limit={limit})")
+
+    # Count query
+    count_q = client.table("call_documents").select("doc_id", count="exact")
+    if purpose_filter:
+        count_q = count_q.eq("call_purpose", purpose_filter)
+    if outcome_filter:
+        count_q = count_q.eq("call_outcome", outcome_filter)
+    count_result = count_q.execute()
+    total = count_result.count or 0
+
+    # Data query
+    data_q = client.table("call_documents").select(
+        "doc_id, call_id, generated_at, call_summary, call_purpose, call_outcome, "
+        "financial_data, entities, commitments, action_items, extraction_model, extraction_tokens"
+    )
+    if purpose_filter:
+        data_q = data_q.eq("call_purpose", purpose_filter)
+    if outcome_filter:
+        data_q = data_q.eq("call_outcome", outcome_filter)
+
+    data_q = data_q.order("generated_at", desc=True).range(offset, offset + limit - 1)
+    result = data_q.execute()
+    docs = result.data if result.data else []
+
+    return docs, total
+
+
+def get_financial_summary(days: int = 30) -> dict:
+    """
+    Aggregated financial intelligence across recent call documents.
+    Uses the financial_summary RPC function.
+    """
+    client = get_supabase_client()
+    logger.info(f"DB RPC financial_summary (days={days})")
+    result = client.rpc("financial_summary", {"days_back": days}).execute()
+    return result.data if result.data else {}

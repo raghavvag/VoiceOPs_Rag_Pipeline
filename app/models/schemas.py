@@ -197,3 +197,89 @@ class PaginationMeta(BaseModel):
     limit: int
     total: int
     total_pages: int
+
+
+# ============================================================
+# CALL DOCUMENT MODELS (Extracted per-call intelligence)
+# ============================================================
+
+class AmountMentioned(BaseModel):
+    value: float
+    currency: str = "INR"
+    context: str = ""
+
+
+class PaymentCommitment(BaseModel):
+    amount: float
+    due_date: Optional[str] = None
+    type: str = "other"
+
+
+class EMIDetails(BaseModel):
+    amount: float
+    frequency: str = "monthly"
+    remaining: int = 0
+
+
+class FinancialData(BaseModel):
+    amounts_mentioned: list[AmountMentioned] = Field(default_factory=list)
+    payment_commitments: list[PaymentCommitment] = Field(default_factory=list)
+    account_references: list[str] = Field(default_factory=list)
+    transaction_references: list[str] = Field(default_factory=list)
+    financial_products: list[str] = Field(default_factory=list)
+    total_outstanding: Optional[float] = None
+    settlement_offered: Optional[float] = None
+    emi_details: Optional[EMIDetails] = None
+
+
+class ExtractedEntities(BaseModel):
+    persons: list[str] = Field(default_factory=list)
+    organizations: list[str] = Field(default_factory=list)
+    dates: list[str] = Field(default_factory=list)
+    locations: list[str] = Field(default_factory=list)
+    phone_numbers: list[str] = Field(default_factory=list)
+    reference_numbers: list[str] = Field(default_factory=list)
+
+
+class CallCommitment(BaseModel):
+    speaker: str
+    commitment: str
+    type: str = "other"
+    confidence: float = Field(default=0.5, ge=0.0, le=1.0)
+    conditional: bool = False
+    condition: Optional[str] = None
+
+
+class TimelineEvent(BaseModel):
+    timestamp_approx: str = "unknown"
+    event: str
+    speaker: str = "SYSTEM"
+    significance: str = "medium"
+
+
+class CallDocument(BaseModel):
+    """Full extracted document for a single call."""
+    call_id: str
+    generated_at: datetime
+    call_summary: str
+    call_purpose: str = "other"
+    call_outcome: str = "other"
+    financial_data: FinancialData = Field(default_factory=FinancialData)
+    entities: ExtractedEntities = Field(default_factory=ExtractedEntities)
+    commitments: list[CallCommitment] = Field(default_factory=list)
+    key_discussion_points: list[str] = Field(default_factory=list)
+    compliance_notes: list[str] = Field(default_factory=list)
+    risk_flags: list[str] = Field(default_factory=list)
+    action_items: list[str] = Field(default_factory=list)
+    call_timeline: list[TimelineEvent] = Field(default_factory=list)
+    extraction_model: str = "gpt-4o-mini"
+    extraction_tokens: int = 0
+    extraction_version: str = "v1"
+
+
+class CallDocumentResponse(BaseModel):
+    """API response wrapping a call document."""
+    call_id: str
+    generated_at: datetime
+    document: dict
+    extraction_metadata: dict

@@ -1,6 +1,6 @@
 """
 API routes for the RAG service.
-Steps 1-8: Full pipeline from validation to grounded assessment.
+Steps 1-9: Full pipeline from validation to grounded assessment + document extraction.
 """
 
 import logging
@@ -8,10 +8,12 @@ import math
 import json as _json
 import re
 from fastapi import APIRouter, HTTPException, Query
+from fastapi.responses import Response
 from app.models.schemas import (
     CallRiskInput, CallAnalysisResponse,
     ChatRequest, ChatResponse, ChatSource, ChatMetadata,
     DashboardStats, RecentActivityItem, PatternCount, StatusUpdate, PaginationMeta,
+    CallDocumentResponse,
 )
 from app.utils.id_generator import generate_call_id, generate_call_timestamp
 from app.services.ingestion import store_call_record
@@ -24,6 +26,8 @@ from app.services.seeding import seed_knowledge_base
 from app.services.chat_retrieval import retrieve_for_chat, extract_call_ids, lookup_calls_by_id
 from app.services.chat_context import build_chat_context
 from app.services.chat_reasoning import run_chat_reasoning
+from app.services.extraction_service import extract_call_document
+from app.services.pdf_generator import generate_call_document_pdf
 from app.services.backboard_service import (
     create_thread_for_call, log_to_thread, get_thread,
     get_thread_messages, get_assistant_threads, query_memory, query_thread,
@@ -33,6 +37,8 @@ from app.db.queries import (
     get_dashboard_stats, get_recent_activity, get_top_patterns,
     get_active_cases, update_call_status, get_calls_paginated,
     update_backboard_thread_id, get_recent_calls,
+    insert_call_document, get_call_document, search_call_documents,
+    get_call_documents_paginated, get_financial_summary,
 )
 
 def status_from_risk_score(score: int) -> str:
@@ -203,7 +209,33 @@ async def analyze_call(payload: CallRiskInput):
     except Exception as e:
         logger.warning(f"[{call_id}] STEP 7b | Status update failed (non-fatal): {str(e)}")
 
-    # --- Step 8: Return Final Response ---
+    # --- Step 9: Extract Call Document (non-fatal) ---
+    document_generated = False
+    try:
+        doc_data = extract_call_document(
+            call_id=call_id,
+            payload=payload.model_dump(),
+            rag_output=rag_output,
+        )
+        # Embed the call summary for document search
+        try:
+            doc_embedding = embed_text(doc_data.get("call_summary", ""))
+        except Exception:
+            doc_embedding = None
+        # Store the document
+        doc_id = f"cdoc_{call_id}"
+        insert_call_document(
+            doc_id=doc_id,
+            call_id=call_id,
+            document_data=doc_data,
+            embedding=doc_embedding,
+        )
+        document_generated = True
+        logger.info(f"[{call_id}] STEP 9 | Call document extracted | tokens={doc_data.get('extraction_tokens', 0)}")
+    except Exception as e:
+        logger.warning(f"[{call_id}] STEP 9 | Document extraction failed (non-fatal): {e}")
+
+    # --- Step 10: Return Final Response ---
     logger.info(f"[{call_id}] DONE | Pipeline complete")
     return {
         "call_id": call_id,
@@ -211,6 +243,7 @@ async def analyze_call(payload: CallRiskInput):
         "input_risk_assessment": payload.risk_assessment.model_dump(),
         "rag_output": rag_output,
         "backboard_thread_id": backboard_thread_id,
+        "document_generated": document_generated,
     }
 
 
@@ -694,4 +727,278 @@ async def query_backboard_thread(call_id: str, body: dict):
         "question": question,
         "answer": answer,
         "backboard_thread_id": thread_id,
+    }
+
+
+# ============================================================
+# Call Document Extraction Endpoints
+# ============================================================
+
+@router.get("/call/{call_id}/document")
+async def get_call_doc(call_id: str):
+    """
+    Get the full extracted document for a specific call.
+    Includes financial data, entities, commitments, timeline, etc.
+    """
+    # Verify call exists
+    call_record = get_call_by_id(call_id)
+    if not call_record:
+        raise HTTPException(status_code=404, detail=f"Call not found: {call_id}")
+
+    doc = get_call_document(call_id)
+    if not doc:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No document for call {call_id}. Use POST /call/{call_id}/document/regenerate to generate one.",
+        )
+
+    return {
+        "call_id": call_id,
+        "generated_at": doc.get("generated_at"),
+        "document": {
+            "call_summary": doc.get("call_summary"),
+            "call_purpose": doc.get("call_purpose"),
+            "call_outcome": doc.get("call_outcome"),
+            "financial_data": doc.get("financial_data", {}),
+            "entities": doc.get("entities", {}),
+            "commitments": doc.get("commitments", []),
+            "key_discussion_points": doc.get("key_discussion_points", []),
+            "compliance_notes": doc.get("compliance_notes", []),
+            "risk_flags": doc.get("risk_flags", []),
+            "action_items": doc.get("action_items", []),
+            "call_timeline": doc.get("call_timeline", []),
+        },
+        "extraction_metadata": {
+            "model": doc.get("extraction_model", "unknown"),
+            "tokens_used": doc.get("extraction_tokens", 0),
+            "version": doc.get("extraction_version", "v1"),
+        },
+    }
+
+
+@router.get("/call/{call_id}/document/financial")
+async def get_call_financial_data(call_id: str):
+    """
+    Get only the financial extraction for a specific call.
+    Useful for quick financial data lookups.
+    """
+    call_record = get_call_by_id(call_id)
+    if not call_record:
+        raise HTTPException(status_code=404, detail=f"Call not found: {call_id}")
+
+    doc = get_call_document(call_id)
+    if not doc:
+        raise HTTPException(status_code=404, detail=f"No document for call {call_id}")
+
+    return {
+        "call_id": call_id,
+        "financial_data": doc.get("financial_data", {}),
+        "commitments": doc.get("commitments", []),
+        "action_items": doc.get("action_items", []),
+    }
+
+
+@router.get("/call/{call_id}/document/export")
+async def export_call_document(
+    call_id: str,
+    format: str = Query(default="json", pattern=r"^(json|pdf)$"),
+):
+    """
+    Export a call document as JSON or PDF.
+    Query param: ?format=json (default) or ?format=pdf
+    """
+    call_record = get_call_by_id(call_id)
+    if not call_record:
+        raise HTTPException(status_code=404, detail=f"Call not found: {call_id}")
+
+    doc = get_call_document(call_id)
+    if not doc:
+        raise HTTPException(status_code=404, detail=f"No document for call {call_id}")
+
+    if format == "pdf":
+        try:
+            pdf_bytes = generate_call_document_pdf(
+                call_id=call_id,
+                document=doc,
+                call_data=call_record,
+            )
+            return Response(
+                content=pdf_bytes,
+                media_type="application/pdf",
+                headers={
+                    "Content-Disposition": f'attachment; filename="call_report_{call_id}.pdf"',
+                },
+            )
+        except Exception as e:
+            logger.error(f"PDF generation failed for {call_id}: {e}")
+            raise HTTPException(status_code=500, detail=f"PDF generation failed: {str(e)}")
+
+    # Default: JSON export
+    return {
+        "call_id": call_id,
+        "generated_at": doc.get("generated_at"),
+        "call_summary": doc.get("call_summary"),
+        "call_purpose": doc.get("call_purpose"),
+        "call_outcome": doc.get("call_outcome"),
+        "financial_data": doc.get("financial_data", {}),
+        "entities": doc.get("entities", {}),
+        "commitments": doc.get("commitments", []),
+        "key_discussion_points": doc.get("key_discussion_points", []),
+        "compliance_notes": doc.get("compliance_notes", []),
+        "risk_flags": doc.get("risk_flags", []),
+        "action_items": doc.get("action_items", []),
+        "call_timeline": doc.get("call_timeline", []),
+        "extraction_metadata": {
+            "model": doc.get("extraction_model"),
+            "tokens_used": doc.get("extraction_tokens", 0),
+            "version": doc.get("extraction_version", "v1"),
+        },
+    }
+
+
+@router.post("/call/{call_id}/document/regenerate")
+async def regenerate_call_document(call_id: str):
+    """
+    (Re)generate the extracted document for a call.
+    Useful for calls processed before document extraction was added,
+    or to re-extract after improvements to the extraction prompt.
+    """
+    call_record = get_call_by_id(call_id)
+    if not call_record:
+        raise HTTPException(status_code=404, detail=f"Call not found: {call_id}")
+
+    rag_output = call_record.get("rag_output")
+    if not rag_output:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Call {call_id} has no RAG output yet. Run analysis first.",
+        )
+
+    # Build payload dict from call record
+    payload = {
+        "call_context": call_record.get("call_context", {}),
+        "speaker_analysis": call_record.get("speaker_analysis", {}),
+        "nlp_insights": call_record.get("nlp_insights", {}),
+        "risk_signals": call_record.get("risk_signals", {}),
+        "risk_assessment": call_record.get("risk_assessment", {}),
+        "summary_for_rag": call_record.get("summary_for_rag", ""),
+        "conversation": call_record.get("conversation", []),
+    }
+
+    try:
+        doc_data = extract_call_document(
+            call_id=call_id,
+            payload=payload,
+            rag_output=rag_output,
+        )
+    except Exception as e:
+        logger.error(f"Document extraction failed for {call_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Extraction failed: {str(e)}")
+
+    # Embed document summary for search
+    try:
+        doc_embedding = embed_text(doc_data.get("call_summary", ""))
+    except Exception:
+        doc_embedding = None
+
+    # Store / upsert
+    doc_id = f"cdoc_{call_id}"
+    try:
+        insert_call_document(
+            doc_id=doc_id,
+            call_id=call_id,
+            document_data=doc_data,
+            embedding=doc_embedding,
+        )
+    except Exception as e:
+        logger.error(f"Document storage failed for {call_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to store document: {str(e)}")
+
+    return {
+        "call_id": call_id,
+        "doc_id": doc_id,
+        "regenerated": True,
+        "extraction_tokens": doc_data.get("extraction_tokens", 0),
+        "call_purpose": doc_data.get("call_purpose"),
+        "call_outcome": doc_data.get("call_outcome"),
+        "financial_amounts_found": len(doc_data.get("financial_data", {}).get("amounts_mentioned", [])),
+        "commitments_found": len(doc_data.get("commitments", [])),
+    }
+
+
+@router.get("/documents")
+async def list_documents(
+    page: int = Query(default=1, ge=1),
+    limit: int = Query(default=10, ge=1, le=50),
+    purpose: str | None = Query(default=None),
+    outcome: str | None = Query(default=None),
+):
+    """Paginated listing of all call documents with optional filters."""
+    try:
+        docs, total = get_call_documents_paginated(
+            page=page, limit=limit,
+            purpose_filter=purpose, outcome_filter=outcome,
+        )
+    except Exception as e:
+        logger.error(f"GET /documents failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to fetch documents: {str(e)}")
+
+    total_pages = math.ceil(total / limit) if total > 0 else 1
+    return {
+        "documents": docs,
+        "pagination": {
+            "page": page,
+            "limit": limit,
+            "total": total,
+            "total_pages": total_pages,
+        },
+    }
+
+
+@router.post("/documents/search")
+async def search_documents(body: dict):
+    """
+    Semantic search across all call documents.
+    Body: {"query": "calls with payment commitments over 10000", "limit": 5}
+    """
+    query = body.get("query")
+    if not query:
+        raise HTTPException(status_code=422, detail="'query' field is required")
+
+    limit = body.get("limit", 5)
+
+    try:
+        query_embedding = embed_text(query)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to embed query: {str(e)}")
+
+    try:
+        results = search_call_documents(query_embedding, limit=limit)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Search failed: {str(e)}")
+
+    return {
+        "query": query,
+        "results": results,
+        "total_results": len(results),
+    }
+
+
+@router.get("/dashboard/financial-intelligence")
+async def dashboard_financial_intelligence(
+    days: int = Query(default=30, ge=1, le=365),
+):
+    """
+    Aggregated financial intelligence across call documents.
+    Shows total commitments, outstanding amounts, purpose/outcome breakdowns.
+    """
+    try:
+        summary = get_financial_summary(days=days)
+    except Exception as e:
+        logger.error(f"DASHBOARD | financial-intelligence failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to fetch financial summary: {str(e)}")
+
+    return {
+        "period_days": days,
+        "summary": summary,
     }
